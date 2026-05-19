@@ -99,20 +99,61 @@ the next runnable open task is the one currently being worked on.
 A track is open or done. A track is closeable when every task in its
 plan.md is done.
 
-## Autonomy rubric
+## Autonomy rubric: mechanical floor + self-classification ceiling
 
-When an agent runs `/driver:go`, it decides reversible things and
-escalates irreversible ones:
+The earlier prose-only rubric ("decide reversible things, escalate
+irreversible ones") leaked. The agent self-classified, and the agent
+had an incentive to keep moving. Driver now layers two enforcement
+mechanisms:
 
-- **Reversible (decide and log to decisions.md)**: naming, file
-  structure, internal helpers, test fixture choices, library/dep
-  choices that don't lock long-term.
-- **Hard-to-reverse (write `<slug>_blocked.md` and stop this task)**:
-  public API changes, schema changes, lexicon shape changes,
-  deletions, architectural choices that affect multiple future tasks.
+### Mechanical floor (CLI-enforced, leak-proof)
 
-When in doubt: "can a future task undo this with a small diff?"
-If yes, decide. If no, escalate.
+`driver/principles.md` lists named rules, one file glob per rule:
+
+```markdown
+- name: core-ir-schema
+  glob: src/core_ir.rs
+  description: any change to CoreIr types
+```
+
+At claim time, `driver claim` records the current git HEAD as
+`start_commit`. At tick time, `driver tick` runs
+`git diff --name-only <start_commit>..HEAD` and matches each touched
+file against every rule's glob. For each tripped rule, tick verifies
+that `<slug>_questions.md` contains a question with `**rule:** <name>`.
+If not, tick refuses with a diagnostic.
+
+The agent cannot bypass this. The rules are project-level config — they
+generalize as the user adds globs, and don't bake project specifics
+into the skill.
+
+### Self-classification ceiling (agent judgment, additive)
+
+`driver ask <track> <slug> "<question>" --context "..."` *without*
+`--rule` is the channel for things the agent thinks are
+architecturally consequential but no glob caught: lossy
+approximations, representation choices, cross-language symmetry
+breaks, naming a public concept. The agent's judgment; over-asking is
+encouraged because asking is cheap (one CLI call, doesn't halt).
+
+### The "ask, don't block" loop
+
+`driver ask` is non-blocking. The task remains open (work is committed,
+tick refuses, agent moves on). Other tasks can still be claimed and
+worked. `/driver:go` keeps looping until no task can advance, then
+batches all open questions into one end-of-run report. The user
+reviews and answers everything in one pass, then re-runs `/driver:go`
+and staged tasks resume.
+
+`driver block` still exists for the "fully stuck, can't even commit
+partial work" case. Different channel, harder block.
+
+### What still goes in `decisions.md`
+
+One-line entries for reversible local choices: variable names,
+internal helpers, fixture content within an existing pattern, library
+trade-offs. The user reviews after the run and can `git revert`
+anything they don't like.
 
 ## What Driver deliberately doesn't have
 
@@ -188,13 +229,14 @@ of the global checks fails.
 
 ## What Driver hasn't yet added
 
-- `driver/principles.md` template — pending, but not blocking.
+- Multi-`*` globs in principles.md (e.g. `src/**/*.rs`). v1 supports
+  one `*` per pattern, which covers exact-file rules and one-level
+  wildcards like `testdata/eval/*.json`.
 - Some skills still re-parse plan.md inline rather than shelling out to
   the CLI — `/driver:status` already delegates; others should follow.
-- The autonomy rubric in `/driver:do` is descriptive prose, not a
-  contract the CLI can enforce. A plan.md annotation
-  (`[design-pass: yes]`, `[ask-first: <topic>]`) parsed by the CLI
-  would make the rubric machine-checkable. See the open conversation
-  about Driver improvements.
+- Multi-developer collaboration. `.active`, `.history.jsonl`, and the
+  questions files are local. If two people share a `driver/` repo,
+  conflicts on `<slug>_questions.md` are possible. Not worth solving
+  until it's a real problem.
 
 These are tracked work, not gaps in the design.

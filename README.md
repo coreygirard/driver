@@ -110,6 +110,10 @@ driver gate                                  stop-hook callback
 driver init-hook                             print settings.json snippet
 driver doctor                                verify PATH, hook, project layout
 driver stats [<track>]                       estimate-vs-actual from .history.jsonl
+
+driver ask <track> <slug> "<question>" [--rule <name>] [--context "..."]
+                                             log an open question for batched user review
+driver questions [<track>]                   list all open questions (answered + unanswered)
 ```
 
 `driver tick` records `{estimate, actual_turns}` to
@@ -131,11 +135,25 @@ Run from anywhere inside a project — `driver` walks up looking for
 | `/driver:go` | Runs *all* runnable tasks until the track is done or blocked |
 | `/driver:close` | Closes a track when all its tasks are ticked |
 
-## Design
+## Principles + the autonomy floor
 
-See `DESIGN.md` for the data-model rationale (why slugs, why a DAG,
-why no phases) and the autonomy rubric used by `/driver:do` and
-`/driver:go`.
+Driver's autonomy rubric has two layers:
+
+- **Mechanical floor**: optional `driver/principles.md` lists rules with
+  file globs. If a task's diff (since claim start) touches a triggered
+  file, `driver tick` refuses unless an `driver ask --rule <name>`
+  question is logged. Leak-proof — the agent can't bypass it.
+- **Self-classification ceiling**: agent uses `driver ask` *without*
+  `--rule` for things that are architecturally consequential but not
+  caught by a glob (lossy approximations, representation choices,
+  symmetry breaks). The agent's judgment; over-asking is encouraged.
+
+Questions land in `<slug>_questions.md` with a `**answer:** _pending_`
+marker. The user answers in-place; `driver tick` then succeeds. The
+`/driver:go` skill batches all open questions into one end-of-run
+report so the user reviews everything at once.
+
+See `DESIGN.md` for the full rationale.
 
 ## License
 

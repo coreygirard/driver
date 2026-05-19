@@ -1,57 +1,69 @@
-Run all runnable tasks of a Driver track end-to-end, autonomously. Equivalent to `/driver:do` in a loop: claim → implement → tick → check `driver next` again → repeat. Stops when no runnable tasks remain (track is done or all remaining tasks are blocked).
+Run all runnable tasks of a Driver track end-to-end, autonomously. Loop: claim → implement → tick (or stage as "answered later") → check `driver next` → repeat. Goal is "do everything Driver can do without input from me, then batch all required questions for one review."
 
-This is for "go run this whole track while I'm away" mode.
+This is for "run this whole track while I'm away" mode.
 
 ## Prerequisite check
 
-Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop. Same recovery instructions as `/driver:do`.
+Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop. Same recovery as `/driver:do`.
+
+If `driver/principles.md` exists, read it once to know which file changes will trigger the floor.
 
 ## Inputs
 
 Optional positional argument: `<track_id>`. If omitted, picks the most recently modified open track.
 
-## Steps
+## Loop
 
-Loop until exit:
+Repeat until no further progress is possible:
 
-1. Run `driver next [<track_id>] --json`. If it errors with "no runnable tasks":
-   - Check `driver blocked [<track_id>]`. If any task is blocked, print the questions and stop.
-   - Otherwise the track is complete: run `driver close <track_id>` and stop.
+1. Run `driver next [<track_id>] --json`.
+   - If "no runnable tasks": check `driver questions [<track_id>]` and `driver blocked [<track_id>]`. If there are unanswered questions or blocks, jump to the **Final report** below. Otherwise the track is complete: `driver close <track_id>` and final report.
 
-2. Follow the steps from `/driver:do` for this one task:
-   a. Write `<slug>_design.md` if the task needs design (per `/driver:do` heuristics) and none exists.
-   b. `driver claim <track_id> <slug> --max-turns <ceil(estimate * 1.3 / 5) * 5>`.
-   c. Implement the task. Stop hook keeps you on it.
-   d. Run the project's test suite. Reject the tick if anything fails.
-   e. Commit. `driver tick <track_id> <slug>`.
+2. Follow `/driver:do`'s steps for that one task (design doc if needed, claim, implement, test, commit, tick).
 
-3. Print a one-line summary for the completed task: `Completed <slug> — <commit-hash>.`
+3. **If `driver tick` refuses with "unanswered question(s)":** that task is *staged* — work committed but task remains open. Release the claim (`driver release`) and loop back to step 1 — pick a different runnable task. Keep going until nothing else can be advanced.
 
-4. Loop back to step 1.
+4. **If `driver tick` refuses with "principles rule tripped":** run the suggested `driver ask --rule <name>` command. Then either keep working on parts of the task that don't depend on the answer, or — if blocked on the answer — release the claim and loop.
 
-## What stops the loop
+5. **If a task gets `driver block`'d** (fully stuck, not just an open question): release and loop. Downstream tasks that depend on this one are now unreachable; that's fine — the DAG handles it.
 
-- All tasks done → `driver close` and exit with a final summary (commits made, total turns spent).
-- A task gets blocked → print the blocking question and exit. The user can resolve it later and re-run `/driver:go` to pick up where we left off.
-- Turn budget exhausted on a single task → the gate auto-releases. Print the partial state and exit without ticking that task. The user can re-run after the issue is understood.
-- Two consecutive tasks fail tests → exit with a summary; something is probably wrong.
+6. **If two consecutive tasks fail tests:** stop the loop and final-report. Something structural is wrong.
 
 ## Decision logging
 
-Across the run, append a short entry to `driver/tracks/<track_id>/decisions.md` for each non-obvious reversible decision you made. One line each — slug, what you decided, one-clause why. The user reviews this after the run; they can `git revert` decisions they disagree with.
+For genuinely reversible calls (naming, internal helpers, fixture choices), append a one-liner to `driver/tracks/<track_id>/decisions.md`. The user reviews after the run.
+
+For anything you'd want the user to weigh in on, use `driver ask` (with `--rule` if a principles rule applies, without `--rule` for self-classified asks). These are the questions surfaced in the final report.
 
 ## Final report
 
-When the loop exits, print:
+When the loop exits, gather and print everything the user needs to resume:
 
 ```
-/driver:go summary
+/driver:go summary — <track_id>
 
-  track: <track_id>
-  duration: <wall time>
-  tasks completed: N
-  blocked: <slug>   (with the question, if any)
-  decisions logged: M  — see driver/tracks/<track_id>/decisions.md
+Completed:   N tasks (~total turns spent)
+  - <slug>   <commit>   (<actual>/<budget> turns)
+  - ...
+
+Staged (work committed, awaiting answers): M tasks
+  - <slug>   <K open question(s)>
+
+Blocked (fully stuck): L tasks
+  - <slug>   <reason>
+
+Decisions logged: D  → driver/tracks/<track_id>/decisions.md
+
+Open questions: Q (run `driver questions` for full list):
+
+  [<track>/<slug>] Q1 (rule=<name>): <question>
+    <context>
+    Answer by editing the file: driver/tracks/.../{slug}_questions.md
+    (replace `_pending_` with your decision)
+
+  [<track>/<slug>] Q2 ...
 ```
 
-**Do not modify tracks other than the named one. Do not skip tests. Do not tick a task whose tests don't pass.**
+When the user has answered the questions, they re-run `/driver:go` and the staged tasks become runnable again — agent picks up where it left off.
+
+**Do not modify tracks other than the named one. Do not skip tests. Do not tick a task whose tests don't pass. Do not invent answers to your own questions.**

@@ -81,6 +81,24 @@ enum Cmd {
     Doctor,
     /// Show estimate-vs-actual statistics from driver/.history.jsonl.
     Stats { track: Option<String> },
+    /// Append an open question to <slug>_questions.md. Does not halt the
+    /// task — agent can keep working on parts that don't depend on the
+    /// answer. Use `driver block` for "fully stuck".
+    Ask {
+        track: String,
+        slug: String,
+        /// Question text (one sentence).
+        question: String,
+        /// Tag the question with a principles.md rule name. Required
+        /// if the task's diff trips a mechanical trigger.
+        #[arg(long)]
+        rule: Option<String>,
+        /// Optional context paragraph.
+        #[arg(long)]
+        context: Option<String>,
+    },
+    /// List open questions across the project (or one track).
+    Questions { track: Option<String> },
 }
 
 fn main() -> ExitCode {
@@ -120,6 +138,14 @@ fn main() -> ExitCode {
         Cmd::InitHook => cmd_init_hook(),
         Cmd::Doctor => cmd_doctor(),
         Cmd::Stats { track } => cmd_stats(track.as_deref()),
+        Cmd::Ask {
+            track,
+            slug,
+            question,
+            rule,
+            context,
+        } => cmd_ask(&track, &slug, &question, rule.as_deref(), context.as_deref()),
+        Cmd::Questions { track } => cmd_questions(track.as_deref()),
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -505,6 +531,15 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
         .find(|t| t.slug == slug)
         .ok_or_else(|| format!("no task '{slug}' in '{track}'"))?;
     let estimate = task.estimate;
+    // Enforce principles + answered-status when ticking to done.
+    if done {
+        let active = read_active(&root);
+        let start_commit = active
+            .as_ref()
+            .filter(|c| c.track == track && c.slug == slug)
+            .map(|c| c.start_commit.clone());
+        enforce_tick_gates(&root, track, slug, start_commit.as_deref())?;
+    }
     let line = &mut lines[task.line];
     let (from, to) = if done {
         ("- [ ]", "- [x]")
@@ -838,6 +873,10 @@ struct ActiveClaim {
     max_turns: u32,
     turn: u32,
     started_at: String,
+    /// Git HEAD commit at claim time, or empty if not in a git repo. Used by
+    /// `driver tick` to diff what changed during the task against the
+    /// principles.md rules.
+    start_commit: String,
 }
 
 fn active_path(root: &Path) -> PathBuf {
@@ -852,6 +891,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
     let mut max_turns: u32 = 50;
     let mut turn: u32 = 0;
     let mut started_at = String::new();
+    let mut start_commit = String::new();
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -862,6 +902,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
             "max_turns" => max_turns = v.trim().parse().unwrap_or(50),
             "turn" => turn = v.trim().parse().unwrap_or(0),
             "started_at" => started_at = v.trim().to_string(),
+            "start_commit" => start_commit = v.trim().to_string(),
             _ => {}
         }
     }
@@ -874,14 +915,20 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
         max_turns,
         turn,
         started_at,
+        start_commit,
     })
 }
 
 fn write_active(root: &Path, claim: &ActiveClaim) -> Result<(), String> {
     let path = active_path(root);
     let body = format!(
-        "track={}\nslug={}\nmax_turns={}\nturn={}\nstarted_at={}\n",
-        claim.track, claim.slug, claim.max_turns, claim.turn, claim.started_at
+        "track={}\nslug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\n",
+        claim.track,
+        claim.slug,
+        claim.max_turns,
+        claim.turn,
+        claim.started_at,
+        claim.start_commit,
     );
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
 }
@@ -946,12 +993,14 @@ fn cmd_claim(track: &str, slug: &str, max_turns: u32) -> Result<(), String> {
             existing.track, existing.slug, existing.turn, existing.max_turns
         ));
     }
+    let start_commit = git_head_commit(&root).unwrap_or_default();
     let claim = ActiveClaim {
         track: track.to_string(),
         slug: slug.to_string(),
         max_turns,
         turn: 0,
         started_at: iso_now(),
+        start_commit,
     };
     write_active(&root, &claim)?;
     println!(
@@ -1385,5 +1434,372 @@ fn cmd_init_hook() -> Result<(), String> {
     println!();
     println!("If you already have a hooks section, merge the Stop array entry into it.");
     println!("Verify with: driver gate ; echo $? (should print 0 when no claim is active)");
+    Ok(())
+}
+
+// ---- principles + ask/questions + tick enforcement ----
+
+#[derive(Debug, Clone)]
+struct PrincipleRule {
+    name: String,
+    glob: String,
+    #[allow(dead_code)]
+    description: String,
+}
+
+fn principles_path(root: &Path) -> PathBuf {
+    root.join("principles.md")
+}
+
+/// Parse `driver/principles.md`. Looks for one block per rule with the shape:
+///
+///     - name: <slug>
+///       glob: <glob-pattern>
+///       description: <one-line>
+///
+/// Anywhere else (free prose, "guidance" sections, etc.) is ignored. The
+/// parser is intentionally lenient — if there are no rules or the file
+/// is absent, we return an empty list and the floor is effectively off.
+fn read_principles(root: &Path) -> Vec<PrincipleRule> {
+    let text = match fs::read_to_string(principles_path(root)) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let mut rules: Vec<PrincipleRule> = Vec::new();
+    let mut cur_name: Option<String> = None;
+    let mut cur_glob: Option<String> = None;
+    let mut cur_desc: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if let Some(v) = line.strip_prefix("- name:") {
+            // Flush previous rule, start new.
+            if let (Some(n), Some(g)) = (cur_name.take(), cur_glob.take()) {
+                rules.push(PrincipleRule {
+                    name: n,
+                    glob: g,
+                    description: cur_desc.take().unwrap_or_default(),
+                });
+            }
+            cur_name = Some(v.trim().to_string());
+            cur_glob = None;
+            cur_desc = None;
+        } else if let Some(v) = line.strip_prefix("glob:") {
+            cur_glob = Some(v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("description:") {
+            cur_desc = Some(v.trim().to_string());
+        }
+    }
+    if let (Some(n), Some(g)) = (cur_name, cur_glob) {
+        rules.push(PrincipleRule {
+            name: n,
+            glob: g,
+            description: cur_desc.unwrap_or_default(),
+        });
+    }
+    rules
+}
+
+/// Glob matcher with a single `*` wildcard. `*` matches any run of
+/// characters that doesn't include `/`. Multi-`*` and `**` are not
+/// supported in v1 — one wildcard per glob covers the common cases
+/// (exact files, `dir/*.ext`).
+fn matches_glob(path: &str, glob: &str) -> bool {
+    if let Some((prefix, suffix)) = glob.split_once('*') {
+        if !path.starts_with(prefix) {
+            return false;
+        }
+        if !path.ends_with(suffix) {
+            return false;
+        }
+        if path.len() < prefix.len() + suffix.len() {
+            return false;
+        }
+        let middle = &path[prefix.len()..path.len() - suffix.len()];
+        !middle.contains('/')
+    } else {
+        path == glob
+    }
+}
+
+fn git_head_commit(root: &Path) -> Option<String> {
+    let project_root = root.parent()?; // strip the trailing "driver/"
+    let out = std::process::Command::new("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .current_dir(project_root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+fn git_touched_files(root: &Path, since_commit: &str) -> Vec<String> {
+    let Some(project_root) = root.parent() else {
+        return Vec::new();
+    };
+    let range = format!("{since_commit}..HEAD");
+    let out = match std::process::Command::new("git")
+        .arg("diff")
+        .arg("--name-only")
+        .arg(&range)
+        .current_dir(project_root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn questions_path(root: &Path, track: &str, slug: &str) -> PathBuf {
+    root.join("tracks").join(track).join(format!("{slug}_questions.md"))
+}
+
+#[derive(Debug, Clone)]
+struct Question {
+    /// 1-based index within the file.
+    index: u32,
+    summary: String,
+    rule: Option<String>,
+    context: String,
+    answered: bool,
+}
+
+fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
+    let path = questions_path(root, track, slug);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Question> = Vec::new();
+    let mut cur_summary: Option<String> = None;
+    let mut cur_rule: Option<String> = None;
+    let mut cur_context = String::new();
+    let mut cur_answered = false;
+    let mut idx: u32 = 0;
+    for raw in text.lines() {
+        if let Some(rest) = raw.strip_prefix("## Q") {
+            // Flush previous.
+            if let Some(s) = cur_summary.take() {
+                out.push(Question {
+                    index: idx,
+                    summary: s,
+                    rule: cur_rule.take(),
+                    context: std::mem::take(&mut cur_context).trim().to_string(),
+                    answered: cur_answered,
+                });
+            }
+            cur_answered = false;
+            cur_rule = None;
+            cur_context.clear();
+            // Parse "<n>: <summary>" or "<n>".
+            let rest = rest.trim_start();
+            let (num_part, after) = match rest.split_once(':') {
+                Some((n, a)) => (n.trim(), a.trim()),
+                None => (rest, ""),
+            };
+            idx = num_part.parse().unwrap_or(idx + 1);
+            cur_summary = Some(after.to_string());
+        } else if let Some(v) = raw.strip_prefix("**rule:**") {
+            let v = v.trim();
+            if !v.is_empty() && v != "(self-classified)" {
+                cur_rule = Some(v.to_string());
+            }
+        } else if let Some(v) = raw.strip_prefix("**answer:**") {
+            let v = v.trim();
+            cur_answered = !(v.is_empty() || v == "_pending_");
+        } else if let Some(v) = raw.strip_prefix("**context:**") {
+            cur_context.push_str(v.trim());
+            cur_context.push('\n');
+        } else if cur_summary.is_some()
+            && !raw.starts_with("# ")
+            && !raw.starts_with("## ")
+            && !raw.trim().is_empty()
+        {
+            // Continuation of context.
+            if !cur_context.is_empty() {
+                cur_context.push(' ');
+            }
+            cur_context.push_str(raw.trim());
+        }
+    }
+    if let Some(s) = cur_summary {
+        out.push(Question {
+            index: idx,
+            summary: s,
+            rule: cur_rule,
+            context: cur_context.trim().to_string(),
+            answered: cur_answered,
+        });
+    }
+    out
+}
+
+fn cmd_ask(
+    track: &str,
+    slug: &str,
+    question: &str,
+    rule: Option<&str>,
+    context: Option<&str>,
+) -> Result<(), String> {
+    let (root, _) = read_tracks()?;
+    let (_, _, tasks) = read_plan(&root, track)?;
+    if !tasks.iter().any(|t| t.slug == slug) {
+        return Err(format!("no task '{slug}' in '{track}'"));
+    }
+    // Validate the rule name if given.
+    if let Some(r) = rule {
+        let rules = read_principles(&root);
+        if !rules.iter().any(|p| p.name == r) {
+            let known: Vec<String> = rules.iter().map(|p| p.name.clone()).collect();
+            return Err(format!(
+                "unknown principles rule '{r}'. Known: [{}]. Add it to driver/principles.md or omit --rule.",
+                known.join(", ")
+            ));
+        }
+    }
+    let existing = read_questions(&root, track, slug);
+    let next_idx = existing.iter().map(|q| q.index).max().unwrap_or(0) + 1;
+    let path = questions_path(&root, track, slug);
+    let mut body = if path.exists() {
+        fs::read_to_string(&path).unwrap_or_default()
+    } else {
+        format!("# Open questions — {slug}\n\nAnswer each by replacing `_pending_` with your decision; re-run `/driver:go` or `/driver:do` to resume.\n")
+    };
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push('\n');
+    body.push_str(&format!("## Q{next_idx}: {}\n", question.trim()));
+    body.push_str(&format!(
+        "**rule:** {}\n",
+        rule.unwrap_or("(self-classified)")
+    ));
+    if let Some(c) = context {
+        body.push_str(&format!("**context:** {}\n", c.trim()));
+    }
+    body.push_str("**answer:** _pending_\n");
+    fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    println!(
+        "Q{next_idx} logged for {track}/{slug}{} → {}",
+        rule.map(|r| format!(" [rule={r}]")).unwrap_or_default(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn cmd_questions(track_filter: Option<&str>) -> Result<(), String> {
+    let (root, tracks) = read_tracks()?;
+    let target_tracks: Vec<String> = match track_filter {
+        Some(t) => {
+            if !tracks.iter().any(|x| x.id == t) {
+                return Err(format!("no such track: {t}"));
+            }
+            vec![t.to_string()]
+        }
+        None => tracks.iter().filter(|x| !x.done).map(|x| x.id.clone()).collect(),
+    };
+    let mut total = 0u32;
+    let mut total_unanswered = 0u32;
+    for track_id in &target_tracks {
+        let Ok((_, _, tasks)) = read_plan(&root, track_id) else {
+            continue;
+        };
+        for task in &tasks {
+            let qs = read_questions(&root, track_id, &task.slug);
+            if qs.is_empty() {
+                continue;
+            }
+            println!("[{track_id}/{}]", task.slug);
+            for q in &qs {
+                total += 1;
+                let mark = if q.answered { "✓" } else { "·" };
+                if !q.answered {
+                    total_unanswered += 1;
+                }
+                let rule_tag = q
+                    .rule
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default();
+                println!("  {mark} Q{}{rule_tag}: {}", q.index, q.summary);
+                if !q.context.is_empty() {
+                    for line in textwrap_simple(&q.context, 72) {
+                        println!("      {line}");
+                    }
+                }
+            }
+        }
+    }
+    if total == 0 {
+        println!("No open questions.");
+    } else {
+        println!(
+            "\n{total} question(s) total, {total_unanswered} unanswered."
+        );
+    }
+    Ok(())
+}
+
+/// Check the principles floor + answered-status for a task that's
+/// about to be ticked. Returns Err with a diagnostic if anything fails.
+fn enforce_tick_gates(
+    root: &Path,
+    track: &str,
+    slug: &str,
+    start_commit: Option<&str>,
+) -> Result<(), String> {
+    // Floor: triggered files touched since claim start must have a
+    // matching rule-tagged question.
+    let rules = read_principles(root);
+    let questions = read_questions(root, track, slug);
+    if !rules.is_empty() {
+        if let Some(commit) = start_commit.filter(|s| !s.is_empty()) {
+            let touched = git_touched_files(root, commit);
+            for rule in &rules {
+                let tripped: Vec<&String> = touched
+                    .iter()
+                    .filter(|f| matches_glob(f, &rule.glob))
+                    .collect();
+                if tripped.is_empty() {
+                    continue;
+                }
+                let has_q = questions
+                    .iter()
+                    .any(|q| q.rule.as_deref() == Some(rule.name.as_str()));
+                if !has_q {
+                    return Err(format!(
+                        "principles rule '{}' tripped — touched: {}\n  → run `driver ask {track} {slug} --rule {} \"<question>\" --context \"...\"` first, or revert the change.",
+                        rule.name,
+                        tripped.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                        rule.name,
+                    ));
+                }
+            }
+        }
+    }
+    // Answered: no question may be _pending_ at tick time.
+    let unanswered: Vec<&Question> = questions.iter().filter(|q| !q.answered).collect();
+    if !unanswered.is_empty() {
+        let preview: Vec<String> = unanswered
+            .iter()
+            .take(3)
+            .map(|q| format!("Q{}: {}", q.index, q.summary))
+            .collect();
+        return Err(format!(
+            "{} unanswered question(s) in {slug}_questions.md:\n  {}\n  → answer them (replace `_pending_`) and re-run `driver tick`.",
+            unanswered.len(),
+            preview.join("\n  "),
+        ));
+    }
     Ok(())
 }
