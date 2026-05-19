@@ -1,0 +1,17 @@
+[package]
+name = "driver"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal track planner. Operates on driver/ project files."
+license = "MIT"
+
+[[bin]]
+name = "driver"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
