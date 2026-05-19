@@ -77,6 +77,10 @@ enum Cmd {
     Gate,
     /// Print the settings.json snippet for the Driver Stop hook.
     InitHook,
+    /// Verify the local Driver setup (binary on PATH, hook installed, project layout).
+    Doctor,
+    /// Show estimate-vs-actual statistics from driver/.history.jsonl.
+    Stats { track: Option<String> },
 }
 
 fn main() -> ExitCode {
@@ -114,6 +118,8 @@ fn main() -> ExitCode {
         Cmd::Release => cmd_release(),
         Cmd::ClaimStatus => cmd_claim_status(),
         Cmd::InitHook => cmd_init_hook(),
+        Cmd::Doctor => cmd_doctor(),
+        Cmd::Stats { track } => cmd_stats(track.as_deref()),
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -498,6 +504,7 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
         .iter()
         .find(|t| t.slug == slug)
         .ok_or_else(|| format!("no task '{slug}' in '{track}'"))?;
+    let estimate = task.estimate;
     let line = &mut lines[task.line];
     let (from, to) = if done {
         ("- [ ]", "- [x]")
@@ -508,6 +515,37 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
         line.replace_range(i..i + 5, to);
         fs::write(&path, lines.join("\n") + "\n").map_err(|e| format!("write: {e}"))?;
         println!("{slug} → {}", if done { "done" } else { "open" });
+        // If ticking to done and there's a matching active claim, record
+        // estimate-vs-actual to history and release the claim. This
+        // closes the loop without needing the post-tick gate to fire.
+        if done {
+            if let Some(claim) = read_active(&root) {
+                if claim.track == track && claim.slug == slug {
+                    let actual = claim.turn;
+                    append_history(
+                        &root,
+                        &HistoryRecord {
+                            ts: iso_now(),
+                            track: track.to_string(),
+                            slug: slug.to_string(),
+                            estimate,
+                            actual_turns: actual,
+                            status: "done",
+                        },
+                    );
+                    delete_active(&root);
+                    if let Some(e) = estimate {
+                        println!(
+                            "  budget: {actual}/{} turns (est {e}, ratio {:.2})",
+                            claim.max_turns,
+                            actual as f64 / e as f64
+                        );
+                    } else {
+                        println!("  budget: {actual}/{} turns (no estimate)", claim.max_turns);
+                    }
+                }
+            }
+        }
     } else {
         println!("No change ({slug} already {}).", if done { "done" } else { "open" });
     }
@@ -1009,15 +1047,317 @@ fn cmd_gate() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Block the stop.
+    // Block the stop. Lead with the pacing info so the agent sees it
+    // at a glance every turn.
+    let pct = (claim.turn as f64) / (claim.max_turns as f64);
+    let warn = if pct >= 0.90 {
+        " ⚠ NEAR BUDGET"
+    } else if pct >= 0.75 {
+        " ⚠ 75%+"
+    } else {
+        ""
+    };
     eprintln!(
-        "Driver task '{slug}' (track {track}) is not done. Run `driver tick {track} {slug}` when complete, or `driver block {track} {slug} \"<question>\"` if you need design input. Turn {turn}/{max}.",
+        "[driver] turn {turn}/{max} — {track}/{slug}{warn}. Tick when done or `driver block {track} {slug} \"<question>\"`.",
         slug = claim.slug,
         track = claim.track,
         turn = claim.turn,
         max = claim.max_turns,
     );
     ExitCode::from(2)
+}
+
+// ---- history (.history.jsonl) + stats ----
+
+struct HistoryRecord {
+    ts: String,
+    track: String,
+    slug: String,
+    estimate: Option<u32>,
+    actual_turns: u32,
+    status: &'static str,
+}
+
+fn history_path(root: &Path) -> PathBuf {
+    root.join(".history.jsonl")
+}
+
+fn append_history(root: &Path, rec: &HistoryRecord) {
+    use std::io::Write as _;
+    let path = history_path(root);
+    let estimate_s = rec
+        .estimate
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "null".into());
+    let line = format!(
+        "{{\"ts\": {}, \"track\": {}, \"slug\": {}, \"estimate\": {estimate_s}, \"actual_turns\": {}, \"status\": {}}}\n",
+        json_str(&rec.ts),
+        json_str(&rec.track),
+        json_str(&rec.slug),
+        rec.actual_turns,
+        json_str(rec.status),
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+fn read_history(root: &Path) -> Vec<HistoryRecord> {
+    let path = history_path(root);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Minimal JSON parse: pull the fields we wrote. Robust enough
+        // for our own append-only format.
+        let ts = json_field(line, "ts").unwrap_or_default();
+        let track = json_field(line, "track").unwrap_or_default();
+        let slug = json_field(line, "slug").unwrap_or_default();
+        let estimate = json_number(line, "estimate");
+        let actual = json_number(line, "actual_turns").unwrap_or(0);
+        let status_owned = json_field(line, "status").unwrap_or_else(|| "done".into());
+        let status: &'static str = match status_owned.as_str() {
+            "blocked" => "blocked",
+            _ => "done",
+        };
+        out.push(HistoryRecord {
+            ts,
+            track,
+            slug,
+            estimate,
+            actual_turns: actual,
+            status,
+        });
+    }
+    out
+}
+
+fn json_field(line: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let i = line.find(&needle)?;
+    let rest = line[i + needle.len()..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn json_number(line: &str, key: &str) -> Option<u32> {
+    let needle = format!("\"{key}\":");
+    let i = line.find(&needle)?;
+    let rest = line[i + needle.len()..].trim_start();
+    // Stop at comma or `}`.
+    let end = rest
+        .find(|c: char| c == ',' || c == '}')
+        .unwrap_or(rest.len());
+    rest[..end].trim().parse().ok()
+}
+
+fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
+    let root = find_driver_root()?;
+    let records = read_history(&root);
+    let mut records: Vec<&HistoryRecord> = records
+        .iter()
+        .filter(|r| r.status == "done")
+        .filter(|r| track_filter.map(|t| t == r.track).unwrap_or(true))
+        .collect();
+    if records.is_empty() {
+        if let Some(t) = track_filter {
+            println!("No history for track '{t}'.");
+        } else {
+            println!("No history yet. Tick a claimed task to populate .history.jsonl.");
+        }
+        return Ok(());
+    }
+    records.sort_by_key(|r| r.ts.clone());
+
+    let n = records.len();
+    let actuals: Vec<u32> = records.iter().map(|r| r.actual_turns).collect();
+    let total: u32 = actuals.iter().sum();
+    let mean = total as f64 / n as f64;
+    let mut sorted = actuals.clone();
+    sorted.sort();
+    let median = if n % 2 == 1 {
+        sorted[n / 2] as f64
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0
+    };
+
+    let with_est: Vec<(&HistoryRecord, u32)> = records
+        .iter()
+        .filter_map(|r| r.estimate.map(|e| (*r, e)))
+        .collect();
+    let est_ratio_mean: Option<f64> = if with_est.is_empty() {
+        None
+    } else {
+        let sum: f64 = with_est
+            .iter()
+            .map(|(r, e)| r.actual_turns as f64 / *e as f64)
+            .sum();
+        Some(sum / with_est.len() as f64)
+    };
+
+    println!("Driver stats — {n} completed task(s){}", track_filter.map(|t| format!(" in {t}")).unwrap_or_default());
+    println!("  total turns:   {total}");
+    println!("  mean turns:    {mean:.1}");
+    println!("  median turns:  {median:.1}");
+    if let Some(r) = est_ratio_mean {
+        println!(
+            "  actual/est:    mean {r:.2} ({})",
+            if r > 1.10 {
+                "estimates run light"
+            } else if r < 0.90 {
+                "estimates run heavy"
+            } else {
+                "well-calibrated"
+            }
+        );
+    }
+
+    // Top 3 over/under, by absolute ratio.
+    if !with_est.is_empty() {
+        let mut by_ratio: Vec<(&HistoryRecord, u32, f64)> = with_est
+            .iter()
+            .map(|(r, e)| (*r, *e, r.actual_turns as f64 / *e as f64))
+            .collect();
+        by_ratio.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let under: Vec<_> = by_ratio.iter().take(3).collect();
+        let over: Vec<_> = by_ratio.iter().rev().take(3).collect();
+        if !under.is_empty() {
+            println!("\nLargest under-estimates (actual ≫ est):");
+            for (r, e, ratio) in under {
+                println!(
+                    "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                    slug = r.slug,
+                    a = r.actual_turns,
+                    track = r.track,
+                );
+            }
+        }
+        if !over.is_empty() {
+            println!("\nLargest over-estimates (actual ≪ est):");
+            for (r, e, ratio) in over {
+                println!(
+                    "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                    slug = r.slug,
+                    a = r.actual_turns,
+                    track = r.track,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---- doctor ----
+
+fn cmd_doctor() -> Result<(), String> {
+    let mut all_ok = true;
+    let bin = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "driver".into());
+
+    // 1. Binary discoverable on PATH as `driver`?
+    let on_path = which_on_path("driver").is_some();
+    report(on_path, "`driver` on PATH", &if on_path {
+        which_on_path("driver").unwrap()
+    } else {
+        format!("not found on PATH (binary lives at {bin})")
+    });
+    all_ok &= on_path;
+
+    // 2. Stop hook installed in ~/.claude/settings.json?
+    let (hook_ok, hook_detail) = check_stop_hook(&bin);
+    report(hook_ok, "Stop hook installed", &hook_detail);
+    all_ok &= hook_ok;
+
+    // 3. cwd inside a driver project? Informational — doctor passes
+    // for global setup even without a project. Mark with ℹ when absent.
+    match find_driver_root() {
+        Ok(root) => {
+            report(true, "driver/ project in cwd", &root.display().to_string());
+            if let Some(c) = read_active(&root) {
+                report(
+                    true,
+                    "Active claim",
+                    &format!("{}/{} — turn {}/{}", c.track, c.slug, c.turn, c.max_turns),
+                );
+            } else {
+                report(true, "Active claim", "(none)");
+            }
+        }
+        Err(_) => {
+            println!("ℹ {:<28} (cd into a project to check)", "driver/ project in cwd");
+        }
+    }
+
+    println!();
+    if all_ok {
+        println!("✓ Driver setup looks good.");
+    } else {
+        println!("✗ Driver setup has issues. Fix the ✗ items above.");
+        return Err("driver doctor reported problems".into());
+    }
+    Ok(())
+}
+
+fn which_on_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+    }
+    None
+}
+
+fn check_stop_hook(bin: &str) -> (bool, String) {
+    let Some(home) = std::env::var_os("HOME") else {
+        return (false, "$HOME not set".into());
+    };
+    let path = PathBuf::from(home).join(".claude").join("settings.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return (
+            false,
+            format!("{} not found. Run `driver init-hook` and paste the snippet.", path.display()),
+        );
+    };
+    // Naive check: does the file mention `<bin> gate` or any `driver gate` command in a Stop hook context?
+    let needles = [format!("{bin} gate"), "driver gate".to_string()];
+    let mentions_bin = needles.iter().any(|n| text.contains(n.as_str()));
+    let mentions_stop = text.contains("\"Stop\"");
+    if mentions_bin && mentions_stop {
+        (true, format!("{}", path.display()))
+    } else if mentions_stop {
+        (
+            false,
+            format!(
+                "{} has a Stop hook but no `driver gate` command. Did the binary path change?",
+                path.display()
+            ),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "{} has no Stop hook entry for driver. Run `driver init-hook`.",
+                path.display()
+            ),
+        )
+    }
+}
+
+fn report(ok: bool, label: &str, detail: &str) {
+    let mark = if ok { "✓" } else { "✗" };
+    println!("{mark} {label:<28} {detail}");
 }
 
 fn cmd_init_hook() -> Result<(), String> {

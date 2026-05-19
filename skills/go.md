@@ -4,7 +4,7 @@ This is for "go run this whole track while I'm away" mode.
 
 ## Prerequisite check
 
-Same as `/driver:do`: verify `driver init-hook` has been run, otherwise no Stop hook safety net.
+Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop. Same recovery instructions as `/driver:do`.
 
 ## Inputs
 

@@ -56,13 +56,16 @@ cd ~/Code/driver  # or wherever you cloned it
 cargo install --path cli
 ln -sf "$(pwd)/skills" ~/.claude/commands/driver
 driver init-hook              # then paste the snippet into ~/.claude/settings.json
+driver doctor                 # verify the setup
 ```
 
 The CLI is available as `driver` on PATH. Skills appear as
 `/driver:new`, `/driver:status`, etc.
 
-Add `driver/.active` to your project `.gitignore` — it's runtime state
-for the Stop hook, not something to commit.
+Add `driver/.active` and `driver/.history.jsonl` to your project
+`.gitignore`. The first is runtime state for the Stop hook; the second
+is a local per-developer log of estimate vs actual turns, used by
+`driver stats` to calibrate future estimates.
 
 ## The Stop-hook claim mechanism
 
@@ -105,7 +108,14 @@ driver release                               end the current claim
 driver claim-status                          show the current claim
 driver gate                                  stop-hook callback
 driver init-hook                             print settings.json snippet
+driver doctor                                verify PATH, hook, project layout
+driver stats [<track>]                       estimate-vs-actual from .history.jsonl
 ```
+
+`driver tick` records `{estimate, actual_turns}` to
+`driver/.history.jsonl` when the ticked task matches the active claim,
+and releases the claim. `driver stats` reads that file. Both files are
+gitignored — they're per-developer runtime state.
 
 Run from anywhere inside a project — `driver` walks up looking for
 `driver/tracks.md`.

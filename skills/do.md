@@ -2,7 +2,7 @@ Run the next runnable task of a Driver track end-to-end. Claims the task, implem
 
 ## Prerequisite check
 
-If `driver init-hook` has not been run yet, the Stop hook isn't installed and `/driver:do` will lose its safety net. Detect this once at the top: run `driver gate ; echo $?` after a transient `driver claim`/`driver release`; if exit is not 0 with empty active state, the hook isn't wired in. Suggest the user run `driver init-hook`, paste the snippet into `~/.claude/settings.json`, and start a fresh session. Then proceed anyway — the skill works without the hook, just without the safety net.
+Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop — the typical fixes are (a) put `~/.cargo/bin` on PATH or symlink the binary, (b) run `driver init-hook` and paste into `~/.claude/settings.json`, (c) `cd` into a project with `driver/tracks.md`. After the user fixes the issue (may require a fresh Claude Code session if the hook was just installed), they can re-run `/driver:do`.
 
 ## Inputs
 
@@ -23,9 +23,17 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
 
 5. Before ticking: run the project's test suite (e.g. `cargo fmt --check && cargo test` for Rust; check `CLAUDE.md` or `README.md` for the right commands). All tests must pass with no regressions in prior tasks' fixtures.
 
-6. Commit the implementation with a clear message that includes the task slug. Then `driver tick <track_id> <slug>`.
+6. Commit the implementation with a clear message that includes the task slug. Then `driver tick <track_id> <slug>` (this writes a record to `driver/.history.jsonl` and releases the active claim automatically).
 
-7. Print a one-line summary: `Completed <slug> — <commit-hash>, <N lines changed>.`
+7. Print a multi-line summary using the data you already have:
+   - `Completed <slug> — <commit-hash>`
+   - `Files touched: <git diff --stat | tail -1>`
+   - `Tests added: <count of new test fns, if any>`
+   - `Fixtures added: <count of new entries in testdata/, if any>`
+   - `Turns: <actual>/<budget> (est ~<estimate>t, ratio <r>)` — copy the budget line that `driver tick` printed
+   - `Decisions logged: <count of lines added to decisions.md>` if you touched it
+
+   Keep it terse — six lines max. The user reads this to know what to review.
 
 ## Autonomy rubric (when to decide vs. escalate)
 

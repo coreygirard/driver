@@ -155,10 +155,46 @@ already uses.
 Don't combine with `/goal` in the same session: both set Stop hooks
 and the interaction is undefined. Pick one per session.
 
+## Calibration: history + stats
+
+`driver tick` appends `{ts, track, slug, estimate, actual_turns,
+status}` to `driver/.history.jsonl` when the ticked task matches the
+active claim, then deletes `.active`. `driver stats [<track>]` reads
+that file and reports mean/median turns, mean actual/est ratio, and
+the three biggest over- and under-estimates by slug.
+
+This is the only thing that ever fixes estimate calibration. Without
+it, the `~K turns` annotation in plan.md is unfalsifiable.
+
+Both `.active` and `.history.jsonl` are per-developer runtime state and
+should be gitignored. Sharing `.history.jsonl` across collaborators
+would conflate execution speeds and isn't the goal — each developer
+calibrates their own pace.
+
+## Doctor
+
+`driver doctor` is the one-shot setup check used by `/driver:do` and
+`/driver:go` as a preflight. It verifies:
+
+- `driver` is on PATH (catches the common `~/.cargo/bin` issue).
+- `~/.claude/settings.json` exists and contains a Stop hook entry
+  invoking `driver gate`.
+- The current working directory is inside a project with
+  `driver/tracks.md`.
+- Reports the active claim if any.
+
+Exits 0 if global setup is OK (project not required); exits 1 if any
+of the global checks fails.
+
 ## What Driver hasn't yet added
 
 - `driver/principles.md` template — pending, but not blocking.
 - Some skills still re-parse plan.md inline rather than shelling out to
   the CLI — `/driver:status` already delegates; others should follow.
+- The autonomy rubric in `/driver:do` is descriptive prose, not a
+  contract the CLI can enforce. A plan.md annotation
+  (`[design-pass: yes]`, `[ask-first: <topic>]`) parsed by the CLI
+  would make the rubric machine-checkable. See the open conversation
+  about Driver improvements.
 
 These are tracked work, not gaps in the design.
