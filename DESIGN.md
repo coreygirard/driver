@@ -35,11 +35,17 @@ Either piece is usable without the other.
 ```
 <project>/
   driver/
-    plan.md                ← required; the single evolving plan
-    <task-slug>_design.md  ← optional, per task
+    plan.md                   ← required; the single evolving plan
+    spec.md                   ← optional; what the project commits to being
+    principles.md             ← optional; project-wide rules
+    <task-slug>_design.md     ← optional, per task
     <task-slug>_questions.md  ← optional, per task; open questions (incl. halt)
-    principles.md          ← optional; project-wide rules
 ```
+
+Three optional layers, each answering one question — *what does this
+commit to being* (spec), *what work is in flight* (plan), and *which
+changes need explicit consent* (principles). Only `plan.md` is
+required; the spec/principles layers compose on top.
 
 ## One plan, no tracks
 
@@ -108,6 +114,75 @@ tasks until none remain."
 
 A task is open or done. No "in progress" middle state — by definition
 the next runnable open task is the one currently being worked on.
+
+## Spec-driven synthesis: content-hashed bullets
+
+`driver/spec.md` is the optional contract layer. Bullets describe
+*what* the project commits to being — capabilities, invariants,
+external behaviors — and plan tasks reference them via `[spec:
+<hash>]`. `/driver:go "<high-level guidance>"` reads `driver spec gap`
+(unmet bullets), proposes tasks for them, and runs the existing
+claim/tick loop. This lets user guidance stay high-level ("continue
+building parity") while the synthesis-to-tasks step is deterministic
+and traceable.
+
+### Why a separate file
+
+The earlier design ran on `plan.md` alone: the user authored task
+bullets directly. That worked for narrow, well-understood work, but
+got noisy as soon as the user wanted to express commitments at a level
+above tasks ("the parser must round-trip", "auth supports email and
+SSO"). Folding commitments into task descriptions made each task carry
+two jobs — the unit of work *and* the rationale — and made it hard for
+the agent to know when work was "done relative to the spec" vs "done
+relative to this one task's description."
+
+`spec.md` separates the two: spec is the *target*, plan is the *work*.
+The agent can iterate plan freely; the user controls spec.
+
+### Why content-hashed IDs (Unison-style)
+
+A spec bullet's identity *is* its content. Editing the bullet yields a
+new ID (6-char FNV-1a-derived hex); old plan-side references become
+orphans, surfaced by `driver spec list`. Two payoffs:
+
+1. **No manual ID management.** No "did the user remember to bump
+   the ID when materially changing this bullet?" judgment call —
+   the hash answers it deterministically.
+2. **Verifiable traceability.** A ticked task with `[spec: a3f2b1]`
+   is a claim about the *exact bullet text* it was built against.
+   Spec history is reconstructible without git archaeology.
+
+The wart: prose changes that aren't semantic (typo fixes, rewording)
+also change the hash, orphaning references. The escape hatch is
+`driver spec amend <old> <new>`, which migrates plan-side refs
+explicitly. Default behavior: edit → new hash → unmet → synthesize
+follow-up work. `amend` is the deliberate "this was cosmetic" act.
+
+### Why FNV-1a 64-bit (not SHA-256 / blake2)
+
+The collision space we need is "no two bullets in one ~50–100-item
+file collide on 24 bits" — birthday-paradox safe to ~4000 bullets.
+FNV-1a is one screen of arithmetic, dependency-free, and instant to
+compute. The Unison framing matters for the *property* (content-derived
+deterministic IDs), not the specific cryptographic strength. If
+projects grow past the collision-safe threshold, swap to SHA-256 by
+changing one function — no schema migration, since hashes are written
+as strings.
+
+### What this is not
+
+`spec.md` is not a requirements document, not a roadmap, not a wiki.
+Bullets must be falsifiable from the repo state — "users can
+authenticate with email" (a `/login` endpoint either accepts email or
+doesn't) is good; "the system should be well-designed" is not. If a
+proposed bullet can't be checked against code or tests, it doesn't
+belong in `spec.md`.
+
+The discipline that prevents Conductor-creep (`product.md` + `tech-
+stack.md` + `workflow.md`) is: one file, tight schema, falsifiable
+content. The skill (`/driver:spec`) is responsible for enforcing this
+norm in conversation.
 
 ## Autonomy rubric: mechanical floor + self-classification ceiling
 
@@ -187,7 +262,9 @@ they disagree with.
 - `metadata.json` per task
 - per-track `index.md`, `notes.md`, `decisions.md`
 - File resolution protocol or default-path tables
-- Project-level `product.md`, `tech-stack.md`, `workflow.md`
+- Project-level `product.md`, `tech-stack.md`, `workflow.md` — `spec.md`
+  is one tight file with a falsifiable-bullet schema, not three prose
+  files
 - Multiple task types (`feature`, `chore`, `bug`)
 - `[~]` "in-progress" state
 - Sub-task bullets within tasks (use TaskCreate during a `/goal`)

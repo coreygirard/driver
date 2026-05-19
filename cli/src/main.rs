@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Full overview: plan, claim, recent ticks, open questions.
+    /// Full overview: plan, claim, recent ticks, open questions, spec.
     Status,
     /// Print the next runnable task.
     Next {
@@ -92,6 +92,33 @@ enum Cmd {
         index: u32,
         answer: String,
     },
+    /// Inspect or amend spec.md (content-hashed bullets defining what
+    /// the project commits to being).
+    Spec {
+        #[command(subcommand)]
+        cmd: SpecCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SpecCmd {
+    /// List all spec bullets with hash and met/planned/unmet status.
+    List,
+    /// Print unmet spec bullets (not referenced by any task).
+    /// Used by `/driver:go` to synthesize new plan tasks.
+    Gap {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Migrate plan.md references from an old hash to a new hash.
+    /// Use this after editing a bullet's wording in spec.md when you
+    /// want the old work to apply to the new bullet.
+    Amend {
+        /// Old hash currently referenced in plan.md.
+        old: String,
+        /// New hash (find via `driver spec list` after editing).
+        new: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -125,6 +152,11 @@ fn main() -> ExitCode {
             index,
             answer,
         } => cmd_answer(&slug, index, &answer),
+        Cmd::Spec { cmd } => match cmd {
+            SpecCmd::List => cmd_spec_list(),
+            SpecCmd::Gap { json } => cmd_spec_gap(json),
+            SpecCmd::Amend { old, new } => cmd_spec_amend(&old, &new),
+        },
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -142,12 +174,15 @@ fn find_driver_root() -> Result<PathBuf, String> {
     let mut dir = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     loop {
         let candidate = dir.join("driver");
-        if candidate.join("plan.md").exists() || candidate.join("principles.md").exists() {
+        if candidate.join("plan.md").exists()
+            || candidate.join("principles.md").exists()
+            || candidate.join("spec.md").exists()
+        {
             return Ok(candidate);
         }
         if !dir.pop() {
             return Err(
-                "no driver/ project found in this directory or any parent (expected driver/plan.md or driver/principles.md)".into(),
+                "no driver/ project found in this directory or any parent (expected driver/plan.md, driver/spec.md, or driver/principles.md)".into(),
             );
         }
     }
@@ -161,6 +196,9 @@ struct Task {
     slug: String,
     estimate: Option<u32>,
     depends: Vec<String>,
+    /// Content hashes of `spec.md` bullets this task implements
+    /// (from a `[spec: hash, hash]` annotation on the task line).
+    spec_refs: Vec<String>,
     /// Line index of the task's first line in the source.
     line: usize,
     description: String,
@@ -210,11 +248,13 @@ fn parse_tasks(lines: &[String]) -> Result<Vec<Task>, String> {
             .ok_or_else(|| format!("line {}: expected **slug** after checkbox", i + 1))?;
         let estimate = parse_estimate(&after_slug);
         let depends = parse_depends(&after_slug);
+        let spec_refs = parse_spec_refs(&after_slug);
         tasks.push(Task {
             done,
             slug,
             estimate,
             depends,
+            spec_refs,
             line: i,
             description: String::new(),
         });
@@ -250,11 +290,18 @@ fn parse_estimate(s: &str) -> Option<u32> {
 }
 
 fn parse_depends(s: &str) -> Vec<String> {
-    // "[depends: a, b, c]"
-    let Some(i) = s.find("[depends:") else {
+    parse_bracket_list(s, "[depends:")
+}
+
+fn parse_spec_refs(s: &str) -> Vec<String> {
+    parse_bracket_list(s, "[spec:")
+}
+
+fn parse_bracket_list(s: &str, prefix: &str) -> Vec<String> {
+    let Some(i) = s.find(prefix) else {
         return Vec::new();
     };
-    let s = &s[i + "[depends:".len()..];
+    let s = &s[i + prefix.len()..];
     let Some(j) = s.find(']') else {
         return Vec::new();
     };
@@ -263,6 +310,167 @@ fn parse_depends(s: &str) -> Vec<String> {
         .map(|x| x.trim().to_string())
         .filter(|x| !x.is_empty())
         .collect()
+}
+
+// ---- spec.md ----
+//
+// `driver/spec.md` is the optional contract layer: a bulleted list of
+// what the project commits to being. Each bullet has a content-derived
+// ID (FNV-1a 64-bit, low 24 bits → 6 hex chars), so editing a bullet
+// automatically yields a new ID — like Unison-style hashed definitions.
+// Plan tasks reference these IDs via `[spec: <hash>, <hash>]`, giving a
+// verifiable link between work and the spec it was built against.
+//
+// Names (`**name**`) are optional and not part of the hash; they are
+// for human readability only. Editing a bullet's wording changes its
+// hash even if the name is unchanged. Use `driver spec amend` to
+// migrate plan-side references when a cosmetic edit should not be
+// treated as a new commitment.
+
+#[derive(Debug, Clone)]
+struct SpecBullet {
+    /// 6-hex-char content hash of the normalized body.
+    hash: String,
+    /// Optional human-readable label; not part of the hash.
+    name: Option<String>,
+    /// Whitespace-normalized body text.
+    body: String,
+    /// 0-based line index of the bullet's first line in spec.md.
+    #[allow(dead_code)]
+    line: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecStatus {
+    /// Referenced by at least one ticked task.
+    Met,
+    /// Referenced only by open tasks.
+    Planned,
+    /// Not referenced by any task.
+    Unmet,
+}
+
+fn spec_path(root: &Path) -> PathBuf {
+    root.join("spec.md")
+}
+
+fn read_spec(root: &Path) -> Option<Vec<SpecBullet>> {
+    let text = fs::read_to_string(spec_path(root)).ok()?;
+    Some(parse_spec(&text))
+}
+
+fn parse_spec(text: &str) -> Vec<SpecBullet> {
+    let mut bullets: Vec<SpecBullet> = Vec::new();
+    let mut current: Option<(Option<String>, String, usize)> = None;
+
+    fn push_current(
+        cur: &mut Option<(Option<String>, String, usize)>,
+        bullets: &mut Vec<SpecBullet>,
+    ) {
+        if let Some((name, body, line)) = cur.take() {
+            let normalized = normalize_body(&body);
+            if !normalized.is_empty() {
+                bullets.push(SpecBullet {
+                    hash: spec_hash(&normalized),
+                    name,
+                    body: normalized,
+                    line,
+                });
+            }
+        }
+    }
+
+    for (i, raw) in text.lines().enumerate() {
+        let t = raw.trim_start();
+        if let Some(body_start) = t.strip_prefix("- ") {
+            push_current(&mut current, &mut bullets);
+            let (name, rest) = parse_bold_slug(body_start)
+                .map(|(n, r)| (Some(n), r.trim_start().to_string()))
+                .unwrap_or((None, body_start.to_string()));
+            current = Some((name, rest, i));
+        } else if raw.starts_with("  ") && !raw.trim().is_empty() && current.is_some() {
+            // Continuation of current bullet (indented, non-blank).
+            if let Some((_, ref mut body, _)) = current {
+                if !body.is_empty() {
+                    body.push(' ');
+                }
+                body.push_str(raw.trim());
+            }
+        } else {
+            // Blank line, heading, or other non-continuation: flush current.
+            push_current(&mut current, &mut bullets);
+        }
+    }
+    push_current(&mut current, &mut bullets);
+    bullets
+}
+
+fn normalize_body(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+/// 6-hex-char content hash. FNV-1a 64-bit truncated to 24 bits.
+/// Dependency-free; collision-resistant at the per-project scale
+/// (~50–100 bullets) we care about.
+fn spec_hash(normalized_body: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in normalized_body.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:06x}", (h & 0xffffff) as u32)
+}
+
+fn spec_status(hash: &str, tasks: &[Task]) -> SpecStatus {
+    let mut met = false;
+    let mut planned = false;
+    for t in tasks {
+        if t.spec_refs.iter().any(|h| h == hash) {
+            if t.done {
+                met = true;
+            } else {
+                planned = true;
+            }
+        }
+    }
+    if met {
+        SpecStatus::Met
+    } else if planned {
+        SpecStatus::Planned
+    } else {
+        SpecStatus::Unmet
+    }
+}
+
+/// Rewrite a single line's `[spec: …]` annotation, replacing any
+/// reference to `old` with `new`. Returns the new line and a count
+/// of how many references were changed.
+fn rewrite_spec_refs(line: &str, old: &str, new: &str) -> (String, u32) {
+    let Some(start) = line.find("[spec:") else {
+        return (line.to_string(), 0);
+    };
+    let after = &line[start..];
+    let Some(end_rel) = after.find(']') else {
+        return (line.to_string(), 0);
+    };
+    let inner = &after["[spec:".len()..end_rel];
+    let mut count = 0u32;
+    let parts: Vec<String> = inner
+        .split(',')
+        .map(|tok| {
+            let trimmed = tok.trim().to_string();
+            if trimmed == old {
+                count += 1;
+                new.to_string()
+            } else {
+                trimmed
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    let replacement = format!("[spec: {}]", parts.join(", "));
+    let result = format!("{}{replacement}{}", &line[..start], &line[start + end_rel + 1..]);
+    (result, count)
 }
 
 // ---- DAG semantics ----
@@ -398,6 +606,52 @@ fn cmd_status() -> Result<(), String> {
                 (None, None) => "(no claim)".into(),
             };
             println!("  {} [{}]  {turns}", r.ts, r.slug);
+        }
+    }
+
+    // == spec ==
+    if let Some(bullets) = read_spec(&root) {
+        println!("\n== spec ==");
+        let tasks: Vec<Task> = plan
+            .as_ref()
+            .map(|(_, _, t)| t.clone())
+            .unwrap_or_default();
+        if bullets.is_empty() {
+            println!("  (spec.md has no bullets)");
+        } else {
+            let mut met = 0u32;
+            let mut planned = 0u32;
+            let mut unmet_bullets: Vec<&SpecBullet> = Vec::new();
+            for b in &bullets {
+                match spec_status(&b.hash, &tasks) {
+                    SpecStatus::Met => met += 1,
+                    SpecStatus::Planned => planned += 1,
+                    SpecStatus::Unmet => unmet_bullets.push(b),
+                }
+            }
+            println!(
+                "  {}/{} met, {planned} planned, {} unmet",
+                met,
+                bullets.len(),
+                unmet_bullets.len()
+            );
+            for b in unmet_bullets.iter().take(3) {
+                let name = b
+                    .name
+                    .as_deref()
+                    .map(|n| format!(" {n}"))
+                    .unwrap_or_default();
+                let preview: String = b.body.chars().take(60).collect();
+                let ellipsis = if b.body.chars().count() > 60 {
+                    "…"
+                } else {
+                    ""
+                };
+                println!("    ○ {}{name}  {preview}{ellipsis}", b.hash);
+            }
+            if unmet_bullets.len() > 3 {
+                println!("    … {} more (see `driver spec gap`)", unmet_bullets.len() - 3);
+            }
         }
     }
 
@@ -1807,6 +2061,161 @@ fn cmd_questions() -> Result<(), String> {
     Ok(())
 }
 
+// ---- driver spec list / gap / amend ----
+
+fn cmd_spec_list() -> Result<(), String> {
+    let root = project_root()?;
+    let bullets = read_spec(&root).ok_or_else(|| {
+        format!(
+            "no spec.md at {} — scaffold one with `/driver:spec`",
+            spec_path(&root).display()
+        )
+    })?;
+    let tasks: Vec<Task> = match read_plan(&root) {
+        Ok((_, _, t)) => t,
+        Err(_) => Vec::new(),
+    };
+    if bullets.is_empty() {
+        println!("(spec.md has no bullets yet)");
+        return Ok(());
+    }
+    let mut met = 0u32;
+    let mut planned = 0u32;
+    let mut unmet = 0u32;
+    for b in &bullets {
+        let status = spec_status(&b.hash, &tasks);
+        let mark = match status {
+            SpecStatus::Met => {
+                met += 1;
+                "✓"
+            }
+            SpecStatus::Planned => {
+                planned += 1;
+                "·"
+            }
+            SpecStatus::Unmet => {
+                unmet += 1;
+                "○"
+            }
+        };
+        let name = b
+            .name
+            .as_deref()
+            .map(|n| format!(" {n}"))
+            .unwrap_or_default();
+        let preview: String = b.body.chars().take(64).collect();
+        let ellipsis = if b.body.chars().count() > 64 {
+            "…"
+        } else {
+            ""
+        };
+        println!(
+            "{mark} {hash}{name}  {preview}{ellipsis}",
+            hash = b.hash
+        );
+    }
+    println!(
+        "\n{} bullets — {met} met, {planned} planned, {unmet} unmet",
+        bullets.len()
+    );
+
+    // Orphan check: hashes referenced in plan.md but missing from current spec.md.
+    let current: HashSet<&str> = bullets.iter().map(|b| b.hash.as_str()).collect();
+    let mut orphans: Vec<String> = Vec::new();
+    for t in &tasks {
+        for h in &t.spec_refs {
+            if !current.contains(h.as_str()) && !orphans.contains(h) {
+                orphans.push(h.clone());
+            }
+        }
+    }
+    if !orphans.is_empty() {
+        println!("\nOrphan references in plan.md (hash not in current spec.md):");
+        for h in &orphans {
+            println!(
+                "  {h} — run `driver spec amend {h} <new-hash>` if you reworded a bullet"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn cmd_spec_gap(json: bool) -> Result<(), String> {
+    let root = project_root()?;
+    let bullets = read_spec(&root)
+        .ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
+    let tasks: Vec<Task> = match read_plan(&root) {
+        Ok((_, _, t)) => t,
+        Err(_) => Vec::new(),
+    };
+    let unmet: Vec<&SpecBullet> = bullets
+        .iter()
+        .filter(|b| spec_status(&b.hash, &tasks) == SpecStatus::Unmet)
+        .collect();
+    if json {
+        print!("[");
+        for (i, b) in unmet.iter().enumerate() {
+            if i > 0 {
+                print!(", ");
+            }
+            let name_json = b
+                .name
+                .as_deref()
+                .map(json_str)
+                .unwrap_or_else(|| "null".into());
+            print!(
+                "{{\"hash\": {}, \"name\": {}, \"body\": {}}}",
+                json_str(&b.hash),
+                name_json,
+                json_str(&b.body),
+            );
+        }
+        println!("]");
+    } else if unmet.is_empty() {
+        println!("No unmet spec bullets.");
+    } else {
+        for b in &unmet {
+            let name = b
+                .name
+                .as_deref()
+                .map(|n| format!(" {n}"))
+                .unwrap_or_default();
+            println!("{}{name}  {}", b.hash, b.body);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_spec_amend(old: &str, new: &str) -> Result<(), String> {
+    if old == new {
+        return Err("old and new hash are identical".into());
+    }
+    let root = project_root()?;
+    let bullets = read_spec(&root)
+        .ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
+    if !bullets.iter().any(|b| b.hash == new) {
+        return Err(format!(
+            "no current spec bullet has hash '{new}'. Run `driver spec list` to see current hashes."
+        ));
+    }
+    let (path, lines, _) = read_plan(&root)?;
+    let mut changed = 0u32;
+    let new_lines: Vec<String> = lines
+        .into_iter()
+        .map(|l| {
+            let (rewritten, count) = rewrite_spec_refs(&l, old, new);
+            changed += count;
+            rewritten
+        })
+        .collect();
+    if changed == 0 {
+        return Err(format!("no task in plan.md references hash '{old}'."));
+    }
+    fs::write(&path, new_lines.join("\n") + "\n").map_err(|e| format!("write: {e}"))?;
+    println!("Migrated {changed} reference(s): {old} → {new}");
+    Ok(())
+}
+
 /// Check the principles floor + answered-status for a task that's
 /// about to be ticked. Returns Err with a diagnostic if anything fails.
 fn enforce_tick_gates(
@@ -1858,4 +2267,160 @@ fn enforce_tick_gates(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_is_deterministic() {
+        assert_eq!(spec_hash("hello world"), spec_hash("hello world"));
+    }
+
+    #[test]
+    fn hash_distinguishes_content() {
+        assert_ne!(spec_hash("hello world"), spec_hash("hello world!"));
+        assert_ne!(spec_hash("auth"), spec_hash("autn"));
+    }
+
+    #[test]
+    fn hash_is_six_hex_chars() {
+        let h = spec_hash("anything");
+        assert_eq!(h.len(), 6);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn normalize_collapses_whitespace() {
+        assert_eq!(normalize_body("  hello   world  "), "hello world");
+        assert_eq!(normalize_body("hello\nworld"), "hello world");
+        assert_eq!(normalize_body("\t a \t b\n"), "a b");
+    }
+
+    #[test]
+    fn whitespace_only_changes_dont_affect_hash() {
+        let h1 = spec_hash(&normalize_body("  hello   world  "));
+        let h2 = spec_hash(&normalize_body("hello world"));
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn typo_fix_changes_hash() {
+        let h1 = spec_hash(&normalize_body("authetication required"));
+        let h2 = spec_hash(&normalize_body("authentication required"));
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn parse_spec_extracts_named_bullet() {
+        let text = "# Spec\n\n- **payments** Users can pay.\n";
+        let bullets = parse_spec(text);
+        assert_eq!(bullets.len(), 1);
+        assert_eq!(bullets[0].name.as_deref(), Some("payments"));
+        assert_eq!(bullets[0].body, "Users can pay.");
+    }
+
+    #[test]
+    fn parse_spec_handles_continuation() {
+        let text = "- First bullet body\n  continuation line.\n- Second.\n";
+        let bullets = parse_spec(text);
+        assert_eq!(bullets.len(), 2);
+        assert_eq!(bullets[0].body, "First bullet body continuation line.");
+        assert_eq!(bullets[1].body, "Second.");
+    }
+
+    #[test]
+    fn parse_spec_bullet_without_name() {
+        let text = "- Just a body.\n";
+        let bullets = parse_spec(text);
+        assert_eq!(bullets.len(), 1);
+        assert_eq!(bullets[0].name, None);
+        assert_eq!(bullets[0].body, "Just a body.");
+    }
+
+    #[test]
+    fn parse_spec_skips_intro_prose() {
+        let text = "# Title\n\nIntro paragraph here.\n\n- First bullet.\n- Second bullet.\n";
+        let bullets = parse_spec(text);
+        assert_eq!(bullets.len(), 2);
+        assert_eq!(bullets[0].body, "First bullet.");
+        assert_eq!(bullets[1].body, "Second bullet.");
+    }
+
+    #[test]
+    fn parse_spec_blank_line_between_bullets() {
+        let text = "- One.\n\n- Two.\n";
+        let bullets = parse_spec(text);
+        assert_eq!(bullets.len(), 2);
+        assert_eq!(bullets[0].body, "One.");
+        assert_eq!(bullets[1].body, "Two.");
+    }
+
+    #[test]
+    fn parse_spec_refs_extracts_hashes() {
+        let refs = parse_spec_refs(" (~3 turns) [spec: a3f2b1, b7c2d8]");
+        assert_eq!(refs, vec!["a3f2b1", "b7c2d8"]);
+    }
+
+    #[test]
+    fn parse_spec_refs_empty_when_missing() {
+        assert!(parse_spec_refs(" (~3 turns) [depends: foo]").is_empty());
+    }
+
+    #[test]
+    fn parse_depends_still_works() {
+        let deps = parse_depends(" (~3 turns) [depends: a, b]");
+        assert_eq!(deps, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn rewrite_spec_refs_replaces_target() {
+        let line = "- [ ] **x** (~1 turn) [spec: a3f2b1, b7c2d8]";
+        let (out, n) = rewrite_spec_refs(line, "a3f2b1", "deadbe");
+        assert_eq!(n, 1);
+        assert!(out.contains("[spec: deadbe, b7c2d8]"));
+    }
+
+    #[test]
+    fn rewrite_spec_refs_no_match_unchanged() {
+        let line = "- [ ] **x** [spec: a3f2b1]";
+        let (out, n) = rewrite_spec_refs(line, "ffffff", "000000");
+        assert_eq!(n, 0);
+        assert_eq!(out, line);
+    }
+
+    #[test]
+    fn spec_status_classifies_correctly() {
+        let bullet_hash = "abc123";
+        let mk_task = |done: bool, refs: Vec<&str>| Task {
+            done,
+            slug: "t".into(),
+            estimate: None,
+            depends: vec![],
+            spec_refs: refs.iter().map(|s| s.to_string()).collect(),
+            line: 0,
+            description: String::new(),
+        };
+        assert_eq!(spec_status(bullet_hash, &[]), SpecStatus::Unmet);
+        assert_eq!(
+            spec_status(bullet_hash, &[mk_task(false, vec!["abc123"])]),
+            SpecStatus::Planned
+        );
+        assert_eq!(
+            spec_status(bullet_hash, &[mk_task(true, vec!["abc123"])]),
+            SpecStatus::Met
+        );
+        // Met wins over planned when both exist.
+        assert_eq!(
+            spec_status(
+                bullet_hash,
+                &[
+                    mk_task(true, vec!["abc123"]),
+                    mk_task(false, vec!["abc123"]),
+                ]
+            ),
+            SpecStatus::Met
+        );
+    }
 }

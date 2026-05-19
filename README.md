@@ -7,11 +7,11 @@ Driver is two pieces:
 
 - **`cli/`** — a small Rust binary (`driver`) that handles all
   mechanical operations on a project's `driver/` directory: parsing
-  `plan.md`, ticking tasks, listing the next runnable task, gating the
-  Stop hook.
+  `plan.md` and `spec.md`, ticking tasks, listing the next runnable
+  task, gating the Stop hook, reporting spec gaps.
 - **`skills/`** — Claude Code slash commands (`/driver:new`,
-  `/driver:status`, `/driver:do`, `/driver:go`) that wrap the CLI for
-  interactive use.
+  `/driver:spec`, `/driver:status`, `/driver:do`, `/driver:go`) that
+  wrap the CLI for interactive use.
 
 Either piece can be used without the other.
 
@@ -21,16 +21,26 @@ Either piece can be used without the other.
 <project>/
   driver/
     plan.md                ← required; the single evolving plan
+    spec.md                ← optional; what the project commits to being
+    principles.md          ← optional; project-wide rules (file globs)
     <slug>_design.md       ← optional, per task; design notes
     <slug>_questions.md    ← optional, per task; open questions (incl. halt)
-    principles.md          ← optional; project-wide rules
     .active                ← runtime; current claim (gitignored)
     .history.jsonl         ← runtime; tick log (gitignored)
 ```
 
-Driver is **one evolving plan** — there are no per-track folders, no
-registry file to maintain. New work appends bullets to `plan.md`;
-completed work stays as ticked history.
+Driver has three optional layers, each answering one question:
+
+| File             | Question it answers                              | Edited by        |
+|------------------|--------------------------------------------------|------------------|
+| `spec.md`        | *What* does the project commit to being?         | `/driver:spec`   |
+| `plan.md`        | *What* work is in flight (and was done)?         | `/driver:go`, `/driver:new` |
+| `principles.md`  | *Which* file changes require explicit consent?   | user, manually   |
+
+`plan.md` is the only one that's required — Driver works fine without
+a spec. With a spec, high-level guidance like `/driver:go "continue
+building parity"` reads `spec.md`, finds bullets no task implements
+yet, and synthesizes tasks to close the gap.
 
 Plans look like:
 
@@ -39,15 +49,35 @@ Plans look like:
 
 2–3 sentences: what and why.
 
-- [ ] **slug** (~K turns) [depends: other-slug, another-slug]
+- [ ] **slug** (~K turns) [depends: other-slug] [spec: a3f2b1]
   Description paragraph.
 
-- [x] **other-slug** (~K turns)
+- [x] **other-slug** (~K turns) [spec: b7c2d8]
   Description paragraph.
 ```
 
 A task is done when its checkbox is ticked. Slugs must be unique
-within `plan.md`. See `DESIGN.md` for the full data model.
+within `plan.md`. `[spec: <hash>]` is the verifiable link to the spec
+bullet a task implements. See `DESIGN.md` for the full data model.
+
+## Spec format (optional)
+
+```markdown
+# Project name
+
+1–2 sentences: what this is.
+
+- **<optional-name>** A capability or invariant the project commits to.
+  Continuation indented two spaces.
+- Bullet without a name. Still gets a content hash.
+```
+
+Each bullet has a **content-derived 6-char hash** (FNV-1a, low 24
+bits). Editing a bullet's body changes its hash, automatically marking
+it as "unmet" until a new task closes it — Unison-style. Names are
+optional and not hashed. See `driver spec list` for the current state
+and `driver spec amend <old> <new>` if a wording fix shouldn't
+invalidate prior work.
 
 ## Install
 
@@ -110,6 +140,10 @@ driver ask <slug> "<question>" [--rule <name>] [--halt] [--context "..."]
                                            --halt marks the task halted until answered
 driver questions                           list all open questions (answered + unanswered)
 driver answer <slug> <Q#> "<answer>"       record a decision on question Q#
+
+driver spec list                           show spec bullets with hash + met/planned/unmet status
+driver spec gap [--json]                   print unmet spec bullets (input to /driver:go synthesis)
+driver spec amend <old-hash> <new-hash>    migrate plan.md refs after a cosmetic spec edit
 ```
 
 `driver tick` always records a completion to `driver/.history.jsonl`.
@@ -129,9 +163,10 @@ Run from anywhere inside a project — `driver` walks up looking for
 | Slash command | What it does |
 |---|---|
 | `/driver:new` | Asks for title + task outline; scaffolds `plan.md`; commits |
+| `/driver:spec` | Conversational edits to `spec.md` (the contract layer); commits |
 | `/driver:status` | Wrapper around `driver status` |
 | `/driver:do` | Runs the next runnable task end-to-end (Stop-hook safety net) |
-| `/driver:go` | Runs *all* runnable tasks until done or halted |
+| `/driver:go [guidance]` | Synthesizes tasks from `spec.md` gaps, then runs all runnable tasks |
 
 ## Principles + the autonomy floor
 
