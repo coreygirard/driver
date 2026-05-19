@@ -20,17 +20,20 @@ Either piece can be used without the other.
 ```
 <project>/
   driver/
-    tracks.md                      ← registry; one bullet per track
     tracks/
       <YYYYMMDD>-<slug>/
         plan.md                    ← required
         spec.md                    ← optional; the "why"
         <slug>_design.md           ← optional; per-task design notes
         <slug>_questions.md        ← optional; open questions (incl. halt)
-        decisions.md               ← optional; appended by /driver:go
     principles.md                  ← optional; project-wide rules
     .active                        ← runtime; the current claim (gitignored)
+    .history.jsonl                 ← runtime; tick log (gitignored)
 ```
+
+The track registry is **derived from the filesystem** — a track exists
+iff `driver/tracks/<id>/plan.md` exists; it's done iff every task in
+that plan is ticked. There's no `tracks.md` to keep in sync.
 
 Plans look like:
 
@@ -99,8 +102,7 @@ driver blocked [<track>]                     list blocked tasks + questions
 driver tick <track> <slug>                   mark task done
 driver untick <track> <slug>                 mark task open again
 driver rename <track> <old-slug> <new-slug>  rename a task (updates deps)
-driver close <track>                         flip tracks.md to [x] if all done
-driver decisions <track>                     print decisions.md
+driver close <track>                         verify every task is ticked
 
 driver claim <track> <slug> --max-turns N    start a claim (Stop hook gate)
 driver release                               end the current claim
@@ -127,19 +129,19 @@ turn-based stats, and flags scope-growth (budget or actual ≥1.5× the
 plan estimate captured at claim time). Both `.active` and
 `.history.jsonl` are gitignored — they're per-developer runtime state.
 
-Run from anywhere inside a project — `driver` walks up looking for
-`driver/tracks.md`.
+Run from anywhere inside a project — `driver` walks up looking for a
+`driver/tracks/` directory (or `driver/principles.md`).
 
 ## Skills
 
 | Slash command | What it does |
 |---|---|
-| `/driver:new` | Asks for slug + summary + task outline; scaffolds files; commits |
-| `/driver:status` | Reads `driver/tracks.md` and reports |
+| `/driver:new` | Asks for slug + summary + task outline; scaffolds `tracks/<id>/plan.md`; commits |
+| `/driver:status` | Lists tracks (derived from the filesystem) and the next runnable task per track |
 | `/driver:next` | Drafts a `/goal` for the next runnable task (paste-then-fire mode) |
 | `/driver:do` | Runs the next runnable task end-to-end (Stop-hook safety net) |
-| `/driver:go` | Runs *all* runnable tasks until the track is done or blocked |
-| `/driver:close` | Closes a track when all its tasks are ticked |
+| `/driver:go` | Runs *all* runnable tasks until the track is done or halted |
+| `/driver:close` | Verifies a track when all its tasks are ticked |
 
 ## Principles + the autonomy floor
 

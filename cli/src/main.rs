@@ -1,7 +1,9 @@
 // driver — minimal track planner.
 //
 // Operates on files under driver/ in the current project. Discovers the
-// project root by walking up from the cwd looking for driver/tracks.md.
+// project root by walking up from the cwd looking for a driver/tracks/
+// directory (or driver/principles.md). The track registry is derived
+// from the filesystem — there's no tracks.md to parse.
 //
 // See DESIGN.md in the driver repo for the data model.
 
@@ -51,8 +53,6 @@ enum Cmd {
     },
     /// Close a track if every task is ticked.
     Close { track: String },
-    /// Print decisions.md for the track.
-    Decisions { track: String },
     /// Start a claim on a task. Configures the Stop hook to keep the
     /// agent working until the task is ticked, blocked, or budget is hit.
     Claim {
@@ -133,7 +133,6 @@ fn main() -> ExitCode {
             new_slug,
         } => cmd_rename(&track, &old_slug, &new_slug),
         Cmd::Close { track } => cmd_close(&track),
-        Cmd::Decisions { track } => cmd_decisions(&track),
         Cmd::Claim {
             track,
             slug,
@@ -176,16 +175,19 @@ fn main() -> ExitCode {
 fn find_driver_root() -> Result<PathBuf, String> {
     let mut dir = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     loop {
-        if dir.join("driver").join("tracks.md").exists() {
-            return Ok(dir.join("driver"));
+        let candidate = dir.join("driver");
+        if candidate.join("tracks").is_dir() || candidate.join("principles.md").exists() {
+            return Ok(candidate);
         }
         if !dir.pop() {
-            return Err("no driver/tracks.md found in this directory or any parent".into());
+            return Err(
+                "no driver/ project found in this directory or any parent (expected driver/tracks/ or driver/principles.md)".into(),
+            );
         }
     }
 }
 
-// ---- tracks.md ----
+// ---- tracks (derived from the filesystem) ----
 
 #[derive(Debug, Clone)]
 struct TrackEntry {
@@ -195,30 +197,44 @@ struct TrackEntry {
     summary: String,
 }
 
+/// Enumerate tracks by walking `driver/tracks/`. A track is any
+/// directory containing a `plan.md`; it's done iff every task in that
+/// plan.md is ticked. The summary is the first `# Heading` line of
+/// plan.md, less the leading hash. Sorted ascending by id, which
+/// (because ids are `YYYYMMDD-<slug>`) gives chronological order.
 fn read_tracks() -> Result<(PathBuf, Vec<TrackEntry>), String> {
     let root = find_driver_root()?;
-    let tracks_md = root.join("tracks.md");
-    let text = fs::read_to_string(&tracks_md).map_err(|e| format!("read tracks.md: {e}"))?;
-    let mut tracks = Vec::new();
-    for line in text.lines() {
-        let t = line.trim_start();
-        let done = t.starts_with("- [x]");
-        if !done && !t.starts_with("- [ ]") {
+    let tracks_dir = root.join("tracks");
+    if !tracks_dir.is_dir() {
+        return Ok((root, Vec::new()));
+    }
+    let mut tracks: Vec<TrackEntry> = Vec::new();
+    let entries = fs::read_dir(&tracks_dir)
+        .map_err(|e| format!("read {}: {e}", tracks_dir.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
             continue;
         }
-        let rest = t[5..].trim_start();
-        let Some(s) = rest.find('[') else { continue };
-        let Some(e) = rest.find(']') else { continue };
-        if e <= s + 1 {
+        let plan = path.join("plan.md");
+        if !plan.exists() {
             continue;
         }
-        let id = rest[s + 1..e].to_string();
-        let summary = rest[e..]
-            .split_once('—')
-            .map(|(_, s)| s.trim().to_string())
+        let id = match path.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let text = fs::read_to_string(&plan).unwrap_or_default();
+        let lines: Vec<String> = text.lines().map(String::from).collect();
+        let tasks = parse_tasks(&lines).unwrap_or_default();
+        let done = !tasks.is_empty() && tasks.iter().all(|t| t.done);
+        let summary = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("# ").map(|s| s.trim().to_string()))
             .unwrap_or_default();
         tracks.push(TrackEntry { done, id, summary });
     }
+    tracks.sort_by(|a, b| a.id.cmp(&b.id));
     Ok((root, tracks))
 }
 
@@ -684,7 +700,7 @@ fn rewrite_depends(line: &str, old: &str, new: &str) -> String {
 }
 
 fn cmd_close(track: &str) -> Result<(), String> {
-    let (root, mut tracks) = read_tracks()?;
+    let (root, _) = read_tracks()?;
     let (_, _, tasks) = read_plan(&root, track)?;
     let unfinished: Vec<&Task> = tasks.iter().filter(|t| !t.done).collect();
     if !unfinished.is_empty() {
@@ -694,49 +710,9 @@ fn cmd_close(track: &str) -> Result<(), String> {
         }
         return Err(msg.trim_end().to_string());
     }
-    let entry = tracks
-        .iter_mut()
-        .find(|t| t.id == track)
-        .ok_or_else(|| format!("track '{track}' not in tracks.md"))?;
-    if entry.done {
-        println!("Already closed.");
-        return Ok(());
-    }
-    let tracks_md = root.join("tracks.md");
-    let text = fs::read_to_string(&tracks_md).map_err(|e| format!("read: {e}"))?;
-    let new_text = text
-        .lines()
-        .map(|line| {
-            let t = line.trim_start();
-            if t.starts_with("- [ ]") && line.contains(&format!("[{track}]")) {
-                line.replacen("- [ ]", "- [x]", 1)
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let new_text = if text.ends_with('\n') {
-        format!("{new_text}\n")
-    } else {
-        new_text
-    };
-    fs::write(&tracks_md, new_text).map_err(|e| format!("write: {e}"))?;
+    // Done-ness is derived from plan.md, so there's no registry line
+    // to flip. Closing a track is purely a verification.
     println!("Closed {track}.");
-    Ok(())
-}
-
-fn cmd_decisions(track: &str) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let path = root.join("tracks").join(track).join("decisions.md");
-    if !path.exists() {
-        println!("No decisions logged for {track}.");
-        return Ok(());
-    }
-    print!(
-        "{}",
-        fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?
-    );
     Ok(())
 }
 

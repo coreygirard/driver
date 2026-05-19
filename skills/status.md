@@ -3,6 +3,6 @@ Show the state of all Driver tracks in the current project. Shells out to the `d
 ## Steps
 
 1. Run `driver status`. Print its output verbatim.
-2. If the CLI exits non-zero or prints "no driver/tracks.md found", suggest running `/driver:new`.
+2. If the CLI exits non-zero or prints "no driver/ project found", suggest running `/driver:new`.
 
-**Do not parse plan.md or tracks.md by hand.** The CLI is the source of truth for parsing.
+**Do not parse plan.md by hand.** The CLI is the source of truth — the registry is derived from `driver/tracks/<id>/plan.md` files at read time.

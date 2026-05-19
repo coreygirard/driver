@@ -50,8 +50,6 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
    - `Tests added: <count of new test fns, if any>`
    - `Fixtures added: <count of new entries in testdata/, if any>`
    - `Turns: <actual>/<budget> (est ~<estimate>t, ratio <r>)` — copy the budget line that `driver tick` printed
-   - `Decisions logged: <count of lines added to decisions.md>` if you touched it
-
    Keep it terse — six lines max.
 
 ## Autonomy rubric (mechanical floor + self-classification ceiling)
@@ -79,7 +77,7 @@ Examples of self-classified asks from real runs:
 
 You can keep working on parts of the task that don't depend on the answer. The question waits for the user. If you genuinely can't make further progress, re-run with `--halt` (`driver ask --halt <track> <slug> "..."`) — that releases the claim and marks the task halted until answered.
 
-**What still belongs in `decisions.md`.** Reversible local calls — naming, internal helpers, test fixture content within the patterns the description names, library choices that don't lock long-term. One line each. The user reviews after the run.
+**What stays out of `ask` entirely.** Reversible local calls — naming, internal helpers, test fixture content within the patterns the description names, library choices that don't lock long-term — just do them, and let the commit message carry the rationale if it's non-obvious. The user reviews via `git log` / `git diff` after the run.
 
 **When in doubt: ask.** Asking is cheap (one CLI call, doesn't halt). The user will see all questions batched at the end of `/driver:go`. Over-asking is fine; under-asking is what we're trying to prevent.
 

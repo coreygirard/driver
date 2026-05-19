@@ -34,16 +34,30 @@ Either piece is usable without the other.
 ```
 <project>/
   driver/
-    tracks.md                      ← registry
     tracks/
       <YYYYMMDD>-<slug>/
         plan.md                    ← required
         spec.md                    ← optional ("why")
         <task-slug>_design.md      ← optional, per task
         <task-slug>_questions.md   ← optional, per task; open questions (incl. halt)
-        decisions.md               ← optional, appended by /driver:go
     principles.md                  ← optional, project-wide rules
 ```
+
+## Registry: derived, not maintained
+
+There's no `tracks.md`. The registry is a filesystem walk: a track
+exists iff `driver/tracks/<id>/plan.md` exists, and it's done iff
+every task in that plan.md is ticked. The summary shown by
+`driver status` comes from plan.md's `# Heading` line.
+
+The earlier design had a hand-maintained `tracks.md`. Real dogfooding
+exposed the obvious drift problem: closing a track required editing
+two files (plan.md ticks, plus the `[x]` in tracks.md), so the
+registry was the single source of bugs and the only authoritative
+state was redundant with plan.md anyway. Derivation removes the file,
+removes one CLI write path, and shrinks `/driver:new` and
+`/driver:close` to filesystem-only operations with no second-source
+to commit.
 
 ## Plan format: task-flat DAG
 
@@ -164,18 +178,28 @@ one fewer CLI command. The halt flag rides on the same question that
 records *why* the task halted, so the audit trail is no worse than
 the old `_blocked.md` sentinel.
 
-### What still goes in `decisions.md`
+### Reversible local calls stay out of `ask`
 
-One-line entries for reversible local choices: variable names,
-internal helpers, fixture content within an existing pattern, library
-trade-offs. The user reviews after the run and can `git revert`
-anything they don't like.
+Variable names, internal helpers, fixture content within an existing
+pattern, library trade-offs — just do them, and let the commit
+message carry the rationale if it's non-obvious. The user reviews via
+`git log` / `git diff` after the run and can `git revert` anything
+they disagree with.
+
+An earlier design had a per-track `decisions.md` that aggregated
+these. Dogfooding showed it was a leakage: about half the calls
+landed in commit messages anyway, so the file gave a false sense of
+completeness and added a second classification axis ("is this
+ask-worthy, decisions.md-worthy, or just-commit-worthy?") that
+nobody needed. Removed.
 
 ## What Driver deliberately doesn't have
 
+- `tracks.md` registry (derived from the filesystem now)
 - `metadata.json` per track
 - per-track `index.md`
 - per-track `notes.md`
+- per-track `decisions.md`
 - File resolution protocol or default-path tables
 - Project-level `product.md`, `tech-stack.md`, `workflow.md`
 - Multiple track types (`feature`, `chore`, `bug`)
@@ -267,8 +291,8 @@ re-reading the JSONL.
 - `driver` is on PATH (catches the common `~/.cargo/bin` issue).
 - `~/.claude/settings.json` exists and contains a Stop hook entry
   invoking `driver gate`.
-- The current working directory is inside a project with
-  `driver/tracks.md`.
+- The current working directory is inside a project with a
+  `driver/tracks/` or `driver/principles.md`.
 - Reports the active claim if any.
 
 Exits 0 if global setup is OK (project not required); exits 1 if any

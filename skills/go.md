@@ -35,7 +35,7 @@ Repeat until no further progress is possible:
 
 ## Decision logging
 
-For genuinely reversible calls (naming, internal helpers, fixture choices), append a one-liner to `driver/tracks/<track_id>/decisions.md`. The user reviews after the run.
+For genuinely reversible calls (naming, internal helpers, fixture choices), just make them — let the commit message carry the rationale if it's non-obvious. The user reviews via `git log` / `git diff` after the run.
 
 For anything you'd want the user to weigh in on, use `driver ask` (with `--rule` if a principles rule applies, without `--rule` for self-classified asks). These are the questions surfaced in the final report.
 
@@ -68,7 +68,6 @@ After the conversation phase, if everything resolved and the loop ran to true co
 Completed:   N tasks (~total turns spent)
   - <slug>   <commit>   (<actual>/<budget> turns)
 
-Decisions logged: D  → driver/tracks/<track_id>/decisions.md
 Questions answered:  Q (all resolved during this run)
 
 Track closed.
