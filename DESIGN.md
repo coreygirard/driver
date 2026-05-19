@@ -201,11 +201,27 @@ and the interaction is undefined. Pick one per session.
 
 ## Calibration: history + stats
 
-`driver tick` appends `{ts, track, slug, estimate, actual_turns,
-status}` to `driver/.history.jsonl` when the ticked task matches the
-active claim, then deletes `.active`. `driver stats [<track>]` reads
-that file and reports mean/median turns, mean actual/est ratio, and
-the three biggest over- and under-estimates by slug.
+`driver tick` *always* appends to `driver/.history.jsonl` when ticking
+to done. The record carries `{ts, track, slug, estimate, actual_turns,
+budget, estimate_at_claim, status}`:
+
+- With a matching active claim, all fields are populated; tick also
+  deletes `.active`.
+- Without one, `actual_turns`, `budget`, and `estimate_at_claim` are
+  `null`, and tick prints a one-line warning. The completion is still
+  recorded so `driver stats` can count tasks shipped, just not their
+  duration.
+
+The earlier "tick only records under a claim" rule lost calibration
+data silently — a real run shipped four tasks with an empty history
+file. Always-record + visible warning makes the failure mode legible.
+
+`driver stats [<track>]` reports mean/median turns (over records that
+have `actual_turns`), mean actual/est ratio, and the three biggest
+over- and under-estimates. It also surfaces **scope-growth**: tasks
+where the claim budget or actual turns exceeded `estimate_at_claim` by
+≥1.5×. That catches mid-flight estimate bumps even when the user
+edited plan.md during the run.
 
 This is the only thing that ever fixes estimate calibration. Without
 it, the `~K turns` annotation in plan.md is unfalsifiable.
@@ -214,6 +230,21 @@ Both `.active` and `.history.jsonl` are per-developer runtime state and
 should be gitignored. Sharing `.history.jsonl` across collaborators
 would conflate execution speeds and isn't the goal — each developer
 calibrates their own pace.
+
+## Session re-entry: `driver resume`
+
+`driver resume` is the one-screen view used by `/driver:do` and
+`/driver:go` as a *second* preflight, after `driver doctor`. It prints,
+in order: the active claim (if any), the last five ticks from history,
+all open questions across all open tracks (with unanswered ones
+expanded), and the next runnable task per open track.
+
+The motivating problem is Claude Code context compaction: a long-track
+session may compact mid-flight, the new agent inherits a summary, and
+`driver/.active` plus the questions files are the only ground truth
+left. `driver resume` reconstitutes that ground truth in one
+prominent block so the agent (and the user) can pick up cold without
+re-reading the JSONL.
 
 ## Doctor
 
@@ -237,6 +268,10 @@ of the global checks fails.
   wildcards like `testdata/eval/*.json`.
 - Some skills still re-parse plan.md inline rather than shelling out to
   the CLI — `/driver:status` already delegates; others should follow.
+- CLI tests. `cli/src/main.rs` is one file with no `#[cfg(test)]`
+  module yet. The parsers (`parse_tasks`, `parse_depends`,
+  glob-matching, `rewrite_depends`, transitive-blocker walk) and the
+  `gate` state machine are load-bearing and unprotected.
 - Multi-developer collaboration. `.active`, `.history.jsonl`, and the
   questions files are local. If two people share a `driver/` repo,
   conflicts on `<slug>_questions.md` are possible. Not worth solving

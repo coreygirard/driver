@@ -110,6 +110,7 @@ driver gate                                  stop-hook callback
 driver init-hook                             print settings.json snippet
 driver doctor                                verify PATH, hook, project layout
 driver stats [<track>]                       estimate-vs-actual from .history.jsonl
+driver resume                                one-screen session re-entry view
 
 driver ask <track> <slug> "<question>" [--rule <name>] [--context "..."]
                                              log an open question for batched user review
@@ -117,10 +118,14 @@ driver questions [<track>]                   list all open questions (answered +
 driver answer <track> <slug> <Q#> "<answer>" record a decision on question Q#
 ```
 
-`driver tick` records `{estimate, actual_turns}` to
-`driver/.history.jsonl` when the ticked task matches the active claim,
-and releases the claim. `driver stats` reads that file. Both files are
-gitignored — they're per-developer runtime state.
+`driver tick` always records a completion to `driver/.history.jsonl`.
+When there's a matching active claim it captures `{estimate,
+actual_turns, budget, estimate_at_claim}` and releases the claim; when
+there isn't, `actual_turns` is `null` and tick warns so the loss is
+visible. `driver stats` reads that file, ignores no-claim records for
+turn-based stats, and flags scope-growth (budget or actual ≥1.5× the
+plan estimate captured at claim time). Both `.active` and
+`.history.jsonl` are gitignored — they're per-developer runtime state.
 
 Run from anywhere inside a project — `driver` walks up looking for
 `driver/tracks.md`.

@@ -6,6 +6,10 @@ This is for "run this whole track while I'm away" mode.
 
 Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop. Same recovery as `/driver:do`.
 
+## Session re-entry
+
+Run `driver resume` once at the top. It prints active claim, recent ticks, open questions, and the next runnable task per track. If there's an active claim or unanswered questions left over from a prior (possibly compacted) session, address those before claiming anything new.
+
 If `driver/principles.md` exists, read it once to know which file changes will trigger the floor.
 
 ## Inputs

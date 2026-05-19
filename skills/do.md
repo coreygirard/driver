@@ -4,6 +4,10 @@ Run the next runnable task of a Driver track end-to-end. Claims the task, implem
 
 Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop — the typical fixes are (a) put `~/.cargo/bin` on PATH or symlink the binary, (b) run `driver init-hook` and paste into `~/.claude/settings.json`, (c) `cd` into a project with `driver/tracks.md`. After the user fixes the issue (may require a fresh Claude Code session if the hook was just installed), they can re-run `/driver:do`.
 
+## Session re-entry
+
+Run `driver resume` once at the top. It prints a one-screen summary: active claim (from a prior session that may have compacted), recent ticks, open questions across all tracks, and the next runnable task per track. Read it before deciding what to do — if there's already an active claim or unanswered questions, surface those first rather than blindly running `driver next`.
+
 If `driver/principles.md` exists, read it once at the top to understand which file changes will require an open question before tick.
 
 ## Inputs

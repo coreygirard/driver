@@ -108,6 +108,10 @@ enum Cmd {
         index: u32,
         answer: String,
     },
+    /// One-screen session re-entry view: active claim, recent ticks,
+    /// open questions, staged tasks. Run after context compaction
+    /// or when picking a project back up.
+    Resume,
 }
 
 fn main() -> ExitCode {
@@ -161,6 +165,7 @@ fn main() -> ExitCode {
             index,
             answer,
         } => cmd_answer(&track, &slug, index, &answer),
+        Cmd::Resume => cmd_resume(),
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -565,35 +570,50 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
         line.replace_range(i..i + 5, to);
         fs::write(&path, lines.join("\n") + "\n").map_err(|e| format!("write: {e}"))?;
         println!("{slug} → {}", if done { "done" } else { "open" });
-        // If ticking to done and there's a matching active claim, record
-        // estimate-vs-actual to history and release the claim. This
-        // closes the loop without needing the post-tick gate to fire.
+        // Always record history on tick-to-done — this is the only way
+        // `driver stats` ever sees data. When a matching claim is active
+        // we also know actual_turns + budget; without one we still
+        // record the completion (with nulls), and warn so the loss of
+        // turn-count is visible rather than silent.
         if done {
-            if let Some(claim) = read_active(&root) {
-                if claim.track == track && claim.slug == slug {
-                    let actual = claim.turn;
-                    append_history(
-                        &root,
-                        &HistoryRecord {
-                            ts: iso_now(),
-                            track: track.to_string(),
-                            slug: slug.to_string(),
-                            estimate,
-                            actual_turns: actual,
-                            status: "done",
-                        },
+            let claim = read_active(&root)
+                .filter(|c| c.track == track && c.slug == slug);
+            let actual_turns = claim.as_ref().map(|c| c.turn);
+            let budget = claim.as_ref().map(|c| c.max_turns);
+            let estimate_at_claim = claim.as_ref().and_then(|c| c.estimate_at_claim);
+            append_history(
+                &root,
+                &HistoryRecord {
+                    ts: iso_now(),
+                    track: track.to_string(),
+                    slug: slug.to_string(),
+                    estimate,
+                    actual_turns,
+                    budget,
+                    estimate_at_claim,
+                    status: "done",
+                },
+            );
+            match (claim.as_ref(), estimate) {
+                (Some(c), Some(e)) => {
+                    println!(
+                        "  budget: {}/{} turns (est {e}, ratio {:.2})",
+                        c.turn,
+                        c.max_turns,
+                        c.turn as f64 / e as f64
                     );
-                    delete_active(&root);
-                    if let Some(e) = estimate {
-                        println!(
-                            "  budget: {actual}/{} turns (est {e}, ratio {:.2})",
-                            claim.max_turns,
-                            actual as f64 / e as f64
-                        );
-                    } else {
-                        println!("  budget: {actual}/{} turns (no estimate)", claim.max_turns);
-                    }
                 }
+                (Some(c), None) => {
+                    println!("  budget: {}/{} turns (no estimate)", c.turn, c.max_turns);
+                }
+                (None, _) => {
+                    println!(
+                        "  note: no active claim — actual_turns not recorded in .history.jsonl. Use `driver claim` before working to capture calibration data."
+                    );
+                }
+            }
+            if claim.is_some() {
+                delete_active(&root);
             }
         }
     } else {
@@ -892,6 +912,10 @@ struct ActiveClaim {
     /// `driver tick` to diff what changed during the task against the
     /// principles.md rules.
     start_commit: String,
+    /// Plan estimate (~K turns) at claim time. Captured here so tick can
+    /// record the estimate the *user authored* before any mid-flight
+    /// plan.md edits, and so `driver stats` can flag scope-growth.
+    estimate_at_claim: Option<u32>,
 }
 
 fn active_path(root: &Path) -> PathBuf {
@@ -907,6 +931,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
     let mut turn: u32 = 0;
     let mut started_at = String::new();
     let mut start_commit = String::new();
+    let mut estimate_at_claim: Option<u32> = None;
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -918,6 +943,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
             "turn" => turn = v.trim().parse().unwrap_or(0),
             "started_at" => started_at = v.trim().to_string(),
             "start_commit" => start_commit = v.trim().to_string(),
+            "estimate_at_claim" => estimate_at_claim = v.trim().parse().ok(),
             _ => {}
         }
     }
@@ -931,19 +957,25 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
         turn,
         started_at,
         start_commit,
+        estimate_at_claim,
     })
 }
 
 fn write_active(root: &Path, claim: &ActiveClaim) -> Result<(), String> {
     let path = active_path(root);
+    let est = claim
+        .estimate_at_claim
+        .map(|e| e.to_string())
+        .unwrap_or_default();
     let body = format!(
-        "track={}\nslug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\n",
+        "track={}\nslug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\nestimate_at_claim={}\n",
         claim.track,
         claim.slug,
         claim.max_turns,
         claim.turn,
         claim.started_at,
         claim.start_commit,
+        est,
     );
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
 }
@@ -1009,6 +1041,7 @@ fn cmd_claim(track: &str, slug: &str, max_turns: u32) -> Result<(), String> {
         ));
     }
     let start_commit = git_head_commit(&root).unwrap_or_default();
+    let estimate_at_claim = task.estimate;
     let claim = ActiveClaim {
         track: track.to_string(),
         slug: slug.to_string(),
@@ -1016,12 +1049,21 @@ fn cmd_claim(track: &str, slug: &str, max_turns: u32) -> Result<(), String> {
         turn: 0,
         started_at: iso_now(),
         start_commit,
+        estimate_at_claim,
     };
     write_active(&root, &claim)?;
     println!(
         "Claimed {}/{} for up to {max_turns} turns.",
         claim.track, claim.slug
     );
+    if let Some(e) = estimate_at_claim {
+        if max_turns > (e as f64 * 1.5) as u32 {
+            println!(
+                "  note: budget {max_turns} is {:.1}× plan estimate (~{e}). Scope-growth will be flagged in `driver stats`.",
+                max_turns as f64 / e as f64
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1054,6 +1096,115 @@ fn cmd_claim_status() -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// One-screen session re-entry. Intended for the start of `/driver:do`
+/// or `/driver:go`, after a context compaction, or when picking a
+/// project back up cold.
+fn cmd_resume() -> Result<(), String> {
+    let (root, tracks) = read_tracks()?;
+
+    // 1. Active claim.
+    println!("== active claim ==");
+    match read_active(&root) {
+        Some(c) => {
+            let est = c
+                .estimate_at_claim
+                .map(|e| format!(", est ~{e}"))
+                .unwrap_or_default();
+            println!(
+                "  {}/{} — turn {}/{} (started {}{est})",
+                c.track, c.slug, c.turn, c.max_turns, c.started_at
+            );
+        }
+        None => println!("  none"),
+    }
+
+    // 2. Recent ticks (last 5).
+    println!("\n== recent ticks ==");
+    let history = read_history(&root);
+    let recent: Vec<&HistoryRecord> = history.iter().rev().take(5).collect();
+    if recent.is_empty() {
+        println!("  none yet");
+    } else {
+        for r in recent {
+            let turns = match (r.actual_turns, r.estimate) {
+                (Some(a), Some(e)) => format!("{a}t / ~{e}t"),
+                (Some(a), None) => format!("{a}t"),
+                (None, Some(e)) => format!("(no claim) / ~{e}t"),
+                (None, None) => "(no claim)".into(),
+            };
+            println!("  {} [{}/{}]  {turns}", r.ts, r.track, r.slug);
+        }
+    }
+
+    // 3. Open questions across all open tracks.
+    println!("\n== open questions ==");
+    let mut total_q = 0u32;
+    let mut total_unanswered = 0u32;
+    let open_tracks: Vec<&TrackEntry> = tracks.iter().filter(|t| !t.done).collect();
+    for tr in &open_tracks {
+        let Ok((_, _, tasks)) = read_plan(&root, &tr.id) else {
+            continue;
+        };
+        for task in &tasks {
+            let qs = read_questions(&root, &tr.id, &task.slug);
+            if qs.is_empty() {
+                continue;
+            }
+            let unanswered_here: Vec<&Question> = qs.iter().filter(|q| !q.answered).collect();
+            total_q += qs.len() as u32;
+            total_unanswered += unanswered_here.len() as u32;
+            if unanswered_here.is_empty() {
+                continue;
+            }
+            println!("  [{}/{}]", tr.id, task.slug);
+            for q in &unanswered_here {
+                let rule = q
+                    .rule
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default();
+                println!("    · Q{}{rule}: {}", q.index, q.summary);
+            }
+        }
+    }
+    if total_q == 0 {
+        println!("  none");
+    } else if total_unanswered == 0 {
+        println!("  all {total_q} answered — staged tasks can be re-ticked");
+    }
+
+    // 4. Next runnable per open track.
+    println!("\n== next runnable ==");
+    let mut any_runnable = false;
+    for tr in &open_tracks {
+        let Ok((_, _, tasks)) = read_plan(&root, &tr.id) else {
+            continue;
+        };
+        let blockers = transitive_blockers(&root, &tr.id, &tasks);
+        let next = tasks
+            .iter()
+            .find(|t| !t.done && is_runnable(t, &tasks, &blockers));
+        match next {
+            Some(t) => {
+                any_runnable = true;
+                let est = t
+                    .estimate
+                    .map(|e| format!(" (~{e}t)"))
+                    .unwrap_or_default();
+                println!("  [{}]  {}{est}", tr.id, t.slug);
+            }
+            None => println!("  [{}]  (none runnable)", tr.id),
+        }
+    }
+    if open_tracks.is_empty() {
+        println!("  no open tracks");
+    } else if !any_runnable && total_unanswered > 0 {
+        println!("  → answer the open questions above to unblock staged tasks");
+    }
+
+    Ok(())
 }
 
 /// The Stop-hook callback.
@@ -1137,8 +1288,20 @@ struct HistoryRecord {
     ts: String,
     track: String,
     slug: String,
+    /// Plan estimate at tick time. Captured by re-reading plan.md;
+    /// reflects whatever value plan.md holds when tick runs.
     estimate: Option<u32>,
-    actual_turns: u32,
+    /// Turns actually spent on the task. `None` when tick fired without
+    /// a matching active claim (no gate was counting turns), so the
+    /// duration is unknown but the completion is still recorded.
+    actual_turns: Option<u32>,
+    /// Claim budget (max_turns) at the time the claim was opened.
+    /// `None` when ticked without a claim.
+    budget: Option<u32>,
+    /// Plan estimate snapshotted at claim time, before any mid-flight
+    /// edits to plan.md. Used by stats to detect scope-growth even when
+    /// the user bumped the estimate during the run.
+    estimate_at_claim: Option<u32>,
     status: &'static str,
 }
 
@@ -1149,16 +1312,18 @@ fn history_path(root: &Path) -> PathBuf {
 fn append_history(root: &Path, rec: &HistoryRecord) {
     use std::io::Write as _;
     let path = history_path(root);
-    let estimate_s = rec
-        .estimate
-        .map(|e| e.to_string())
-        .unwrap_or_else(|| "null".into());
+    let opt_num = |v: Option<u32>| {
+        v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
+    };
     let line = format!(
-        "{{\"ts\": {}, \"track\": {}, \"slug\": {}, \"estimate\": {estimate_s}, \"actual_turns\": {}, \"status\": {}}}\n",
+        "{{\"ts\": {}, \"track\": {}, \"slug\": {}, \"estimate\": {}, \"actual_turns\": {}, \"budget\": {}, \"estimate_at_claim\": {}, \"status\": {}}}\n",
         json_str(&rec.ts),
         json_str(&rec.track),
         json_str(&rec.slug),
-        rec.actual_turns,
+        opt_num(rec.estimate),
+        opt_num(rec.actual_turns),
+        opt_num(rec.budget),
+        opt_num(rec.estimate_at_claim),
         json_str(rec.status),
     );
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -1186,7 +1351,9 @@ fn read_history(root: &Path) -> Vec<HistoryRecord> {
         let track = json_field(line, "track").unwrap_or_default();
         let slug = json_field(line, "slug").unwrap_or_default();
         let estimate = json_number(line, "estimate");
-        let actual = json_number(line, "actual_turns").unwrap_or(0);
+        let actual_turns = json_number(line, "actual_turns");
+        let budget = json_number(line, "budget");
+        let estimate_at_claim = json_number(line, "estimate_at_claim");
         let status_owned = json_field(line, "status").unwrap_or_else(|| "done".into());
         let status: &'static str = match status_owned.as_str() {
             "blocked" => "blocked",
@@ -1197,7 +1364,9 @@ fn read_history(root: &Path) -> Vec<HistoryRecord> {
             track,
             slug,
             estimate,
-            actual_turns: actual,
+            actual_turns,
+            budget,
+            estimate_at_claim,
             status,
         });
     }
@@ -1236,82 +1405,119 @@ fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
         if let Some(t) = track_filter {
             println!("No history for track '{t}'.");
         } else {
-            println!("No history yet. Tick a claimed task to populate .history.jsonl.");
+            println!("No history yet. Tick a task to populate .history.jsonl.");
         }
         return Ok(());
     }
     records.sort_by_key(|r| r.ts.clone());
 
     let n = records.len();
-    let actuals: Vec<u32> = records.iter().map(|r| r.actual_turns).collect();
-    let total: u32 = actuals.iter().sum();
-    let mean = total as f64 / n as f64;
-    let mut sorted = actuals.clone();
-    sorted.sort();
-    let median = if n % 2 == 1 {
-        sorted[n / 2] as f64
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0
-    };
-
-    let with_est: Vec<(&HistoryRecord, u32)> = records
+    let n_no_actual = records.iter().filter(|r| r.actual_turns.is_none()).count();
+    let with_actual: Vec<(&HistoryRecord, u32)> = records
         .iter()
-        .filter_map(|r| r.estimate.map(|e| (*r, e)))
+        .filter_map(|r| r.actual_turns.map(|a| (*r, a)))
         .collect();
-    let est_ratio_mean: Option<f64> = if with_est.is_empty() {
-        None
-    } else {
-        let sum: f64 = with_est
-            .iter()
-            .map(|(r, e)| r.actual_turns as f64 / *e as f64)
-            .sum();
-        Some(sum / with_est.len() as f64)
-    };
 
-    println!("Driver stats — {n} completed task(s){}", track_filter.map(|t| format!(" in {t}")).unwrap_or_default());
-    println!("  total turns:   {total}");
-    println!("  mean turns:    {mean:.1}");
-    println!("  median turns:  {median:.1}");
-    if let Some(r) = est_ratio_mean {
+    println!(
+        "Driver stats — {n} completed task(s){}",
+        track_filter.map(|t| format!(" in {t}")).unwrap_or_default()
+    );
+    if n_no_actual > 0 {
         println!(
-            "  actual/est:    mean {r:.2} ({})",
-            if r > 1.10 {
-                "estimates run light"
-            } else if r < 0.90 {
-                "estimates run heavy"
-            } else {
-                "well-calibrated"
-            }
+            "  ({n_no_actual} ticked without a claim — actual_turns not captured)"
         );
     }
 
-    // Top 3 over/under, by absolute ratio.
-    if !with_est.is_empty() {
-        let mut by_ratio: Vec<(&HistoryRecord, u32, f64)> = with_est
+    if !with_actual.is_empty() {
+        let actuals: Vec<u32> = with_actual.iter().map(|(_, a)| *a).collect();
+        let total: u32 = actuals.iter().sum();
+        let mean = total as f64 / actuals.len() as f64;
+        let mut sorted = actuals.clone();
+        sorted.sort();
+        let m = sorted.len();
+        let median = if m % 2 == 1 {
+            sorted[m / 2] as f64
+        } else {
+            (sorted[m / 2 - 1] + sorted[m / 2]) as f64 / 2.0
+        };
+        println!("  total turns:   {total}");
+        println!("  mean turns:    {mean:.1}");
+        println!("  median turns:  {median:.1}");
+
+        let with_est: Vec<(&HistoryRecord, u32, u32)> = with_actual
             .iter()
-            .map(|(r, e)| (*r, *e, r.actual_turns as f64 / *e as f64))
+            .filter_map(|(r, a)| r.estimate.map(|e| (*r, *a, e)))
             .collect();
-        by_ratio.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        let under: Vec<_> = by_ratio.iter().take(3).collect();
-        let over: Vec<_> = by_ratio.iter().rev().take(3).collect();
-        if !under.is_empty() {
-            println!("\nLargest under-estimates (actual ≫ est):");
-            for (r, e, ratio) in under {
-                println!(
-                    "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
-                    slug = r.slug,
-                    a = r.actual_turns,
-                    track = r.track,
-                );
+        if !with_est.is_empty() {
+            let ratio_sum: f64 = with_est
+                .iter()
+                .map(|(_, a, e)| *a as f64 / *e as f64)
+                .sum();
+            let ratio_mean = ratio_sum / with_est.len() as f64;
+            println!(
+                "  actual/est:    mean {ratio_mean:.2} ({})",
+                if ratio_mean > 1.10 {
+                    "estimates run light"
+                } else if ratio_mean < 0.90 {
+                    "estimates run heavy"
+                } else {
+                    "well-calibrated"
+                }
+            );
+
+            let mut by_ratio: Vec<(&HistoryRecord, u32, u32, f64)> = with_est
+                .iter()
+                .map(|(r, a, e)| (*r, *a, *e, *a as f64 / *e as f64))
+                .collect();
+            by_ratio.sort_by(|x, y| y.3.partial_cmp(&x.3).unwrap_or(std::cmp::Ordering::Equal));
+            let under: Vec<_> = by_ratio.iter().take(3).collect();
+            let over: Vec<_> = by_ratio.iter().rev().take(3).collect();
+            if !under.is_empty() {
+                println!("\nLargest under-estimates (actual ≫ est):");
+                for (r, a, e, ratio) in under {
+                    println!(
+                        "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                        slug = r.slug,
+                        track = r.track,
+                    );
+                }
+            }
+            if !over.is_empty() {
+                println!("\nLargest over-estimates (actual ≪ est):");
+                for (r, a, e, ratio) in over {
+                    println!(
+                        "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                        slug = r.slug,
+                        track = r.track,
+                    );
+                }
             }
         }
-        if !over.is_empty() {
-            println!("\nLargest over-estimates (actual ≪ est):");
-            for (r, e, ratio) in over {
+
+        // Scope-growth: claim budget exceeded the at-claim plan estimate
+        // by ≥1.5×, or actual exceeded the at-claim estimate by ≥1.5×.
+        // Catches mid-flight estimate bumps even when the plan was
+        // edited so `estimate` and `estimate_at_claim` diverged.
+        let grew: Vec<(&HistoryRecord, u32, u32, u32)> = with_actual
+            .iter()
+            .filter_map(|(r, a)| {
+                let e0 = r.estimate_at_claim?;
+                let b = r.budget?;
+                let ratio_b = b as f64 / e0 as f64;
+                let ratio_a = *a as f64 / e0 as f64;
+                if ratio_b >= 1.5 || ratio_a >= 1.5 {
+                    Some((*r, *a, b, e0))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !grew.is_empty() {
+            println!("\nScope-growth (budget or actual ≥ 1.5× plan estimate at claim):");
+            for (r, a, b, e0) in &grew {
                 println!(
-                    "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                    "  {slug:<28} ~{e0}t planned → {b}t budgeted, {a}t actual [{track}]",
                     slug = r.slug,
-                    a = r.actual_turns,
                     track = r.track,
                 );
             }
