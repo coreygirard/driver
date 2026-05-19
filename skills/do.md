@@ -24,7 +24,7 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
 
 4. Implement the task. Use TaskCreate to track sub-steps if helpful. The Stop hook keeps you on this task until either:
    - You run `driver tick <track_id> <slug>` (task complete and committed; tick enforces the principles floor + answered-status — see Autonomy section below).
-   - You run `driver block <track_id> <slug> "<question>"` (you are fully stuck — no progress possible on this task without input).
+   - You run `driver ask --halt <track_id> <slug> "<question>"` (you are fully stuck — no progress possible on this task without input). This releases the claim automatically.
    - The turn budget runs out (gate auto-releases and warns).
 
 5. Before ticking: run the project's test suite (e.g. `cargo fmt --check && cargo test` for Rust; check `CLAUDE.md` or `README.md` for the right commands). All tests must pass with no regressions.
@@ -77,7 +77,7 @@ Examples of self-classified asks from real runs:
 - "Approximate DE mixed declension as weak?"
 - "48 declension cells vs 72 with mixed paradigm?"
 
-You can keep working on parts of the task that don't depend on the answer. The question waits for the user. If you genuinely can't make further progress, `driver block` (fully stuck) on top.
+You can keep working on parts of the task that don't depend on the answer. The question waits for the user. If you genuinely can't make further progress, re-run with `--halt` (`driver ask --halt <track> <slug> "..."`) — that releases the claim and marks the task halted until answered.
 
 **What still belongs in `decisions.md`.** Reversible local calls — naming, internal helpers, test fixture content within the patterns the description names, library choices that don't lock long-term. One line each. The user reviews after the run.
 

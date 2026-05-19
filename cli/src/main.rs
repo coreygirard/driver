@@ -43,14 +43,6 @@ enum Cmd {
     Tick { track: String, slug: String },
     /// Untick a task (mark open again).
     Untick { track: String, slug: String },
-    /// Block a task by writing <slug>_blocked.md with the question.
-    Block {
-        track: String,
-        slug: String,
-        question: String,
-    },
-    /// Remove <slug>_blocked.md.
-    Unblock { track: String, slug: String },
     /// Rename a task: updates plan.md and renames <slug>_* files.
     Rename {
         track: String,
@@ -81,9 +73,12 @@ enum Cmd {
     Doctor,
     /// Show estimate-vs-actual statistics from driver/.history.jsonl.
     Stats { track: Option<String> },
-    /// Append an open question to <slug>_questions.md. Does not halt the
-    /// task — agent can keep working on parts that don't depend on the
-    /// answer. Use `driver block` for "fully stuck".
+    /// Append an open question to <slug>_questions.md. By default
+    /// non-blocking — the agent can keep working on parts that don't
+    /// depend on the answer. Pass `--halt` for "fully stuck": that
+    /// marks the task as halted, releases the active claim if any, and
+    /// makes dependents transitively unreachable until the question is
+    /// answered.
     Ask {
         track: String,
         slug: String,
@@ -96,6 +91,10 @@ enum Cmd {
         /// Optional context paragraph.
         #[arg(long)]
         context: Option<String>,
+        /// Mark the question as a hard halt: task can't make further
+        /// progress until answered. Replaces the old `driver block`.
+        #[arg(long)]
+        halt: bool,
     },
     /// List open questions across the project (or one track).
     Questions { track: Option<String> },
@@ -128,12 +127,6 @@ fn main() -> ExitCode {
         Cmd::Blocked { track } => cmd_blocked(track),
         Cmd::Tick { track, slug } => cmd_tick(&track, &slug, true),
         Cmd::Untick { track, slug } => cmd_tick(&track, &slug, false),
-        Cmd::Block {
-            track,
-            slug,
-            question,
-        } => cmd_block(&track, &slug, &question),
-        Cmd::Unblock { track, slug } => cmd_unblock(&track, &slug),
         Cmd::Rename {
             track,
             old_slug,
@@ -157,7 +150,8 @@ fn main() -> ExitCode {
             question,
             rule,
             context,
-        } => cmd_ask(&track, &slug, &question, rule.as_deref(), context.as_deref()),
+            halt,
+        } => cmd_ask(&track, &slug, &question, rule.as_deref(), context.as_deref(), halt),
         Cmd::Questions { track } => cmd_questions(track.as_deref()),
         Cmd::Answer {
             track,
@@ -333,11 +327,13 @@ fn parse_depends(s: &str) -> Vec<String> {
 
 // ---- DAG semantics ----
 
+/// A task is directly blocked iff its questions file has at least one
+/// unanswered halt-marked question. Replaces the old `<slug>_blocked.md`
+/// sentinel file — halt is now a flag on a `driver ask`-logged question.
 fn directly_blocked(root: &Path, track: &str, slug: &str) -> bool {
-    root.join("tracks")
-        .join(track)
-        .join(format!("{slug}_blocked.md"))
-        .exists()
+    read_questions(root, track, slug)
+        .iter()
+        .any(|q| q.halt && !q.answered)
 }
 
 fn transitive_blockers(
@@ -527,14 +523,18 @@ fn cmd_blocked(track: Option<String>) -> Result<(), String> {
     let (_, _, tasks) = read_plan(&root, &id)?;
     let mut any = false;
     for t in &tasks {
-        if directly_blocked(&root, &id, &t.slug) {
+        let halts: Vec<Question> = read_questions(&root, &id, &t.slug)
+            .into_iter()
+            .filter(|q| q.halt && !q.answered)
+            .collect();
+        for q in &halts {
             any = true;
-            let path = root
-                .join("tracks")
-                .join(&id)
-                .join(format!("{}_blocked.md", t.slug));
-            let q = fs::read_to_string(&path).unwrap_or_default();
-            println!("[{}] {}", t.slug, q.trim());
+            let rule = q
+                .rule
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default();
+            println!("[{}] Q{}{rule}: {}", t.slug, q.index, q.summary);
         }
     }
     if !any {
@@ -622,36 +622,6 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_block(track: &str, slug: &str, question: &str) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let (_, _, tasks) = read_plan(&root, track)?;
-    if !tasks.iter().any(|t| t.slug == slug) {
-        return Err(format!("no task '{slug}' in '{track}'"));
-    }
-    let path = root
-        .join("tracks")
-        .join(track)
-        .join(format!("{slug}_blocked.md"));
-    fs::write(&path, format!("{}\n", question.trim_end())).map_err(|e| format!("write: {e}"))?;
-    println!("Wrote {}", path.display());
-    Ok(())
-}
-
-fn cmd_unblock(track: &str, slug: &str) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let path = root
-        .join("tracks")
-        .join(track)
-        .join(format!("{slug}_blocked.md"));
-    if !path.exists() {
-        println!("{slug} is not blocked.");
-        return Ok(());
-    }
-    fs::remove_file(&path).map_err(|e| format!("remove: {e}"))?;
-    println!("Removed {}", path.display());
-    Ok(())
-}
-
 fn cmd_rename(track: &str, old: &str, new: &str) -> Result<(), String> {
     if old == new {
         return Err("old and new slug are identical".into());
@@ -675,7 +645,7 @@ fn cmd_rename(track: &str, old: &str, new: &str) -> Result<(), String> {
     fs::write(&path, new_lines.join("\n") + "\n").map_err(|e| format!("write: {e}"))?;
     // Rename associated files.
     let track_dir = root.join("tracks").join(track);
-    for suffix in ["_design.md", "_blocked.md"] {
+    for suffix in ["_design.md", "_questions.md"] {
         let from = track_dir.join(format!("{old}{suffix}"));
         if from.exists() {
             let to = track_dir.join(format!("{new}{suffix}"));
@@ -1160,12 +1130,20 @@ fn cmd_resume() -> Result<(), String> {
             }
             println!("  [{}/{}]", tr.id, task.slug);
             for q in &unanswered_here {
-                let rule = q
-                    .rule
-                    .as_deref()
-                    .map(|r| format!(" ({r})"))
-                    .unwrap_or_default();
-                println!("    · Q{}{rule}: {}", q.index, q.summary);
+                let mut tags: Vec<String> = Vec::new();
+                if let Some(r) = &q.rule {
+                    tags.push(r.clone());
+                }
+                if q.halt {
+                    tags.push("halt".into());
+                }
+                let tag_str = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", tags.join(", "))
+                };
+                let mark = if q.halt { "✗" } else { "·" };
+                println!("    {mark} Q{}{tag_str}: {}", q.index, q.summary);
             }
         }
     }
@@ -1236,12 +1214,8 @@ fn cmd_gate() -> ExitCode {
         }
     }
 
-    // Check whether the task was blocked.
-    let blocked_path = root
-        .join("tracks")
-        .join(&claim.track)
-        .join(format!("{}_blocked.md", claim.slug));
-    if blocked_path.exists() {
+    // Check whether the task is halted by an unanswered halt-question.
+    if directly_blocked(&root, &claim.track, &claim.slug) {
         delete_active(&root);
         return ExitCode::SUCCESS;
     }
@@ -1794,6 +1768,11 @@ struct Question {
     rule: Option<String>,
     context: String,
     answered: bool,
+    /// Marks the question as a hard halt: the task can't make further
+    /// progress until this is answered. An unanswered halt-question
+    /// makes the task act blocked (`is_runnable` returns false; gate
+    /// releases the claim; dependents are transitively unreachable).
+    halt: bool,
 }
 
 fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
@@ -1806,6 +1785,7 @@ fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
     let mut cur_rule: Option<String> = None;
     let mut cur_context = String::new();
     let mut cur_answered = false;
+    let mut cur_halt = false;
     let mut idx: u32 = 0;
     for raw in text.lines() {
         if let Some(rest) = raw.strip_prefix("## Q") {
@@ -1817,9 +1797,11 @@ fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
                     rule: cur_rule.take(),
                     context: std::mem::take(&mut cur_context).trim().to_string(),
                     answered: cur_answered,
+                    halt: cur_halt,
                 });
             }
             cur_answered = false;
+            cur_halt = false;
             cur_rule = None;
             cur_context.clear();
             // Parse "<n>: <summary>" or "<n>".
@@ -1838,6 +1820,8 @@ fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
         } else if let Some(v) = raw.strip_prefix("**answer:**") {
             let v = v.trim();
             cur_answered = !(v.is_empty() || v == "_pending_");
+        } else if let Some(v) = raw.strip_prefix("**halt:**") {
+            cur_halt = matches!(v.trim(), "true" | "yes" | "1");
         } else if let Some(v) = raw.strip_prefix("**context:**") {
             cur_context.push_str(v.trim());
             cur_context.push('\n');
@@ -1860,6 +1844,7 @@ fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
             rule: cur_rule,
             context: cur_context.trim().to_string(),
             answered: cur_answered,
+            halt: cur_halt,
         });
     }
     out
@@ -1871,6 +1856,7 @@ fn cmd_ask(
     question: &str,
     rule: Option<&str>,
     context: Option<&str>,
+    halt: bool,
 ) -> Result<(), String> {
     let (root, _) = read_tracks()?;
     let (_, _, tasks) = read_plan(&root, track)?;
@@ -1905,16 +1891,40 @@ fn cmd_ask(
         "**rule:** {}\n",
         rule.unwrap_or("(self-classified)")
     ));
+    if halt {
+        body.push_str("**halt:** true\n");
+    }
     if let Some(c) = context {
         body.push_str(&format!("**context:** {}\n", c.trim()));
     }
     body.push_str("**answer:** _pending_\n");
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))?;
+    let mut tags: Vec<String> = Vec::new();
+    if let Some(r) = rule {
+        tags.push(format!("rule={r}"));
+    }
+    if halt {
+        tags.push("halt".into());
+    }
+    let tag_str = if tags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", tags.join(", "))
+    };
     println!(
-        "Q{next_idx} logged for {track}/{slug}{} → {}",
-        rule.map(|r| format!(" [rule={r}]")).unwrap_or_default(),
+        "Q{next_idx} logged for {track}/{slug}{tag_str} → {}",
         path.display()
     );
+    if halt {
+        // If this halt-question belongs to the actively-claimed task,
+        // release the claim — the agent has signalled "stuck."
+        if let Some(claim) = read_active(&root) {
+            if claim.track == track && claim.slug == slug {
+                delete_active(&root);
+                println!("  claim released (halt question logged).");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1991,16 +2001,29 @@ fn cmd_questions(track_filter: Option<&str>) -> Result<(), String> {
             println!("[{track_id}/{}]", task.slug);
             for q in &qs {
                 total += 1;
-                let mark = if q.answered { "✓" } else { "·" };
+                let mark = if q.answered {
+                    "✓"
+                } else if q.halt {
+                    "✗"
+                } else {
+                    "·"
+                };
                 if !q.answered {
                     total_unanswered += 1;
                 }
-                let rule_tag = q
-                    .rule
-                    .as_deref()
-                    .map(|r| format!(" ({r})"))
-                    .unwrap_or_default();
-                println!("  {mark} Q{}{rule_tag}: {}", q.index, q.summary);
+                let mut tags: Vec<String> = Vec::new();
+                if let Some(r) = &q.rule {
+                    tags.push(r.clone());
+                }
+                if q.halt {
+                    tags.push("halt".into());
+                }
+                let tag_str = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", tags.join(", "))
+                };
+                println!("  {mark} Q{}{tag_str}: {}", q.index, q.summary);
                 if !q.context.is_empty() {
                     for line in textwrap_simple(&q.context, 72) {
                         println!("      {line}");

@@ -40,7 +40,7 @@ Either piece is usable without the other.
         plan.md                    ← required
         spec.md                    ← optional ("why")
         <task-slug>_design.md      ← optional, per task
-        <task-slug>_blocked.md     ← optional, per task; pauses that task
+        <task-slug>_questions.md   ← optional, per task; open questions (incl. halt)
         decisions.md               ← optional, appended by /driver:go
     principles.md                  ← optional, project-wide rules
 ```
@@ -136,20 +136,33 @@ approximations, representation choices, cross-language symmetry
 breaks, naming a public concept. The agent's judgment; over-asking is
 encouraged because asking is cheap (one CLI call, doesn't halt).
 
-### The "ask, don't block" loop
+### The "ask, don't block" loop — and one channel for halt
 
-`driver ask` is non-blocking. The task remains open (work is committed,
-tick refuses, agent moves on). Other tasks can still be claimed and
-worked. `/driver:go` keeps looping until no task can advance, then
-the skill switches into a *conversational walkthrough* with the user
-over all the accumulated open questions — one at a time, with context
-and the agent's recommendation, pausing for discussion. When the user
-decides, the skill records the answer via `driver answer <track>
-<slug> <Q#> "<decision>"`. Once all answered, `/driver:go` resumes the
-loop with the now-runnable staged tasks.
+`driver ask` is the only escalation channel. By default it's
+non-blocking: the task remains open (work is committed, tick refuses,
+agent moves on), other tasks can still be claimed and worked.
+`/driver:go` keeps looping until no task can advance, then switches
+into a *conversational walkthrough* with the user over the
+accumulated open questions — one at a time, with context and the
+agent's recommendation, pausing for discussion. When the user decides,
+the skill records the answer via `driver answer <track> <slug> <Q#>
+"<decision>"`. Once all answered, `/driver:go` resumes the loop with
+the now-runnable staged tasks.
 
-`driver block` still exists for the "fully stuck, can't even commit
-partial work" case. Different channel, harder block.
+For the "fully stuck, no further progress on this task" case, pass
+`--halt`: the question is logged with `**halt:** true`, the active
+claim is released, and the task is treated as blocked (`is_runnable`
+returns false; gate releases; dependents are transitively
+unreachable). Answering the halt-question clears the halt
+automatically.
+
+There used to be a separate `driver block` / `<slug>_blocked.md`
+channel. Real dogfooding never fired it — `ask` covered every case —
+and "task with unanswered halt-question" gives the same
+downstream-unreachable semantics with one fewer file convention and
+one fewer CLI command. The halt flag rides on the same question that
+records *why* the task halted, so the audit trail is no worse than
+the old `_blocked.md` sentinel.
 
 ### What still goes in `decisions.md`
 
@@ -184,7 +197,7 @@ hook (configured globally via `~/.claude/settings.json`) runs
 1. Reads `driver/.active`. If missing → exit 0, normal stop.
 2. Increments turn count.
 3. If the task is now ticked in `plan.md` → release + exit 0.
-4. If `<slug>_blocked.md` exists → release + exit 0.
+4. If `<slug>_questions.md` has any unanswered halt-question → release + exit 0.
 5. If turn > max_turns → release + exit 0 (with a warning).
 6. Otherwise → exit 2 with a stderr message, blocking the stop.
 
@@ -193,8 +206,8 @@ the task is done" — without depending on `/goal`. Skills like
 `/driver:do` can now run a task end-to-end in one command, with no
 paste step. The gate is deterministic (file-state check, no LLM
 evaluator), simpler than `/goal`'s Haiku-judging condition, and the
-escalation channel (`<slug>_blocked.md`) is the same as `/driver:next`
-already uses.
+escalation channel (`driver ask --halt`) is the same one `/driver:next`
+and the rest of Driver use.
 
 Don't combine with `/goal` in the same session: both set Stop hooks
 and the interaction is undefined. Pick one per session.

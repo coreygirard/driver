@@ -29,7 +29,7 @@ Repeat until no further progress is possible:
 
 4. **If `driver tick` refuses with "principles rule tripped":** run the suggested `driver ask --rule <name>` command. Then either keep working on parts of the task that don't depend on the answer, or — if blocked on the answer — release the claim and loop.
 
-5. **If a task gets `driver block`'d** (fully stuck, not just an open question): release and loop. Downstream tasks that depend on this one are now unreachable; that's fine — the DAG handles it.
+5. **If a task is fully stuck** (not just an open question — you genuinely can't make further progress): `driver ask --halt <track> <slug> "<question>"`. That logs the question with a halt marker, releases the active claim, and makes dependents transitively unreachable until the question is answered. Loop on.
 
 6. **If two consecutive tasks fail tests:** stop the loop and final-report. Something structural is wrong.
 

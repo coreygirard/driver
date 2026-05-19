@@ -26,7 +26,7 @@ Either piece can be used without the other.
         plan.md                    ← required
         spec.md                    ← optional; the "why"
         <slug>_design.md           ← optional; per-task design notes
-        <slug>_blocked.md          ← optional; pauses that task
+        <slug>_questions.md        ← optional; open questions (incl. halt)
         decisions.md               ← optional; appended by /driver:go
     principles.md                  ← optional; project-wide rules
     .active                        ← runtime; the current claim (gitignored)
@@ -83,9 +83,10 @@ driver init-hook                                 print the settings.json snippet
 After installing the hook (via `driver init-hook` + paste, or by
 adding the snippet to `~/.claude/settings.json` directly), each agent
 turn ends with `driver gate` running. If a claim is active and the
-task isn't ticked or blocked, gate exits 2 — Claude Code interprets
+task isn't ticked or halted, gate exits 2 — Claude Code interprets
 this as "keep working." The claim auto-releases when the task is
-ticked (`driver tick`), blocked (`driver block`), or budget exhausted.
+ticked (`driver tick`), halted by an unanswered `driver ask --halt`
+question, or budget exhausted.
 
 ## CLI commands
 
@@ -97,8 +98,6 @@ driver tasks [<track>]                       list tasks with status
 driver blocked [<track>]                     list blocked tasks + questions
 driver tick <track> <slug>                   mark task done
 driver untick <track> <slug>                 mark task open again
-driver block <track> <slug> "<question>"     write <slug>_blocked.md
-driver unblock <track> <slug>                remove <slug>_blocked.md
 driver rename <track> <old-slug> <new-slug>  rename a task (updates deps)
 driver close <track>                         flip tracks.md to [x] if all done
 driver decisions <track>                     print decisions.md
@@ -112,8 +111,9 @@ driver doctor                                verify PATH, hook, project layout
 driver stats [<track>]                       estimate-vs-actual from .history.jsonl
 driver resume                                one-screen session re-entry view
 
-driver ask <track> <slug> "<question>" [--rule <name>] [--context "..."]
+driver ask <track> <slug> "<question>" [--rule <name>] [--halt] [--context "..."]
                                              log an open question for batched user review
+                                             --halt marks the task halted until answered
 driver questions [<track>]                   list all open questions (answered + unanswered)
 driver answer <track> <slug> <Q#> "<answer>" record a decision on question Q#
 ```

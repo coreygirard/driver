@@ -17,7 +17,7 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
 
    When the implementation is complete, run `driver tick <track_id> <slug>` to mark the task done.
 
-   Prove by `cargo fmt --check` exit 0 (or the project's analogue), the project's test suite exits 0 with no regressions, and any task-specific verification criteria above. Stop after <estimate * 1.3, rounded to nearest 5> turns. If you encounter a hard-to-reverse design question not answered in the description or `<slug>_design.md`, run `driver block <track_id> <slug> "<question>"` and stop.
+   Prove by `cargo fmt --check` exit 0 (or the project's analogue), the project's test suite exits 0 with no regressions, and any task-specific verification criteria above. Stop after <estimate * 1.3, rounded to nearest 5> turns. If you encounter a hard-to-reverse design question not answered in the description or `<slug>_design.md`, run `driver ask --halt <track_id> <slug> "<question>"` and stop.
    ```
 
    If the project's CLAUDE.md references a non-Rust toolchain, substitute the appropriate commands. If unsure, leave a `<fill in test command>` placeholder.
