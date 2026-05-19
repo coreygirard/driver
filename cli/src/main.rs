@@ -61,10 +61,30 @@ enum Cmd {
     Close { track: String },
     /// Print decisions.md for the track.
     Decisions { track: String },
+    /// Start a claim on a task. Configures the Stop hook to keep the
+    /// agent working until the task is ticked, blocked, or budget is hit.
+    Claim {
+        track: String,
+        slug: String,
+        #[arg(long, default_value_t = 50)]
+        max_turns: u32,
+    },
+    /// End the current claim (idempotent).
+    Release,
+    /// Show the current claim, if any.
+    ClaimStatus,
+    /// Stop-hook callback. Exits 2 if the active claim is incomplete.
+    Gate,
+    /// Print the settings.json snippet for the Driver Stop hook.
+    InitHook,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // gate has special exit semantics: 2 means "block the stop".
+    if let Cmd::Gate = cli.command {
+        return cmd_gate();
+    }
     let result = match cli.command {
         Cmd::Status => cmd_status(),
         Cmd::Next { track, json } => cmd_next(track, json),
@@ -86,6 +106,15 @@ fn main() -> ExitCode {
         } => cmd_rename(&track, &old_slug, &new_slug),
         Cmd::Close { track } => cmd_close(&track),
         Cmd::Decisions { track } => cmd_decisions(&track),
+        Cmd::Claim {
+            track,
+            slug,
+            max_turns,
+        } => cmd_claim(&track, &slug, max_turns),
+        Cmd::Release => cmd_release(),
+        Cmd::ClaimStatus => cmd_claim_status(),
+        Cmd::InitHook => cmd_init_hook(),
+        Cmd::Gate => unreachable!(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -753,4 +782,268 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+// ---- claim / release / gate ----
+//
+// The "claim" mechanism is Driver's analogue of `/goal`. A claim records
+// {track, slug, max_turns, turn count} in `driver/.active`. The Stop
+// hook (configured via `driver init-hook`) runs `driver gate` after
+// every agent turn. The gate increments the turn counter, releases the
+// claim if the task has been ticked or blocked or budget exhausted, and
+// otherwise exits 2 to prevent the agent from stopping.
+
+#[derive(Debug, Clone)]
+struct ActiveClaim {
+    track: String,
+    slug: String,
+    max_turns: u32,
+    turn: u32,
+    started_at: String,
+}
+
+fn active_path(root: &Path) -> PathBuf {
+    root.join(".active")
+}
+
+fn read_active(root: &Path) -> Option<ActiveClaim> {
+    let path = active_path(root);
+    let text = fs::read_to_string(&path).ok()?;
+    let mut track = String::new();
+    let mut slug = String::new();
+    let mut max_turns: u32 = 50;
+    let mut turn: u32 = 0;
+    let mut started_at = String::new();
+    for line in text.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        match k.trim() {
+            "track" => track = v.trim().to_string(),
+            "slug" => slug = v.trim().to_string(),
+            "max_turns" => max_turns = v.trim().parse().unwrap_or(50),
+            "turn" => turn = v.trim().parse().unwrap_or(0),
+            "started_at" => started_at = v.trim().to_string(),
+            _ => {}
+        }
+    }
+    if track.is_empty() || slug.is_empty() {
+        return None;
+    }
+    Some(ActiveClaim {
+        track,
+        slug,
+        max_turns,
+        turn,
+        started_at,
+    })
+}
+
+fn write_active(root: &Path, claim: &ActiveClaim) -> Result<(), String> {
+    let path = active_path(root);
+    let body = format!(
+        "track={}\nslug={}\nmax_turns={}\nturn={}\nstarted_at={}\n",
+        claim.track, claim.slug, claim.max_turns, claim.turn, claim.started_at
+    );
+    fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+fn delete_active(root: &Path) {
+    let _ = fs::remove_file(active_path(root));
+}
+
+fn iso_now() -> String {
+    // Avoid pulling in chrono. Use the system clock and format as
+    // best-effort ISO 8601 UTC.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // YYYY-MM-DDTHH:MM:SSZ — convert secs to a date.
+    // Naive: use a minimal algorithm.
+    format_unix_seconds(secs)
+}
+
+fn format_unix_seconds(mut secs: u64) -> String {
+    // Days since 1970-01-01.
+    let day_secs = 86_400u64;
+    let days = (secs / day_secs) as i64;
+    let time_in_day = secs % day_secs;
+    let hh = time_in_day / 3600;
+    let mm = (time_in_day % 3600) / 60;
+    let ss = time_in_day % 60;
+    // Compute Y-M-D from days since epoch (1970-01-01 was Thursday).
+    let (y, mo, d) = days_to_ymd(days + 719_468); // shift so day 0 = 0000-03-01
+    let _ = &mut secs;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", y, mo, d, hh, mm, ss)
+}
+
+// Adapted from Howard Hinnant's date algorithms (public domain).
+fn days_to_ymd(z: i64) -> (i64, u32, u32) {
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as i64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+fn cmd_claim(track: &str, slug: &str, max_turns: u32) -> Result<(), String> {
+    let (root, _) = read_tracks()?;
+    let (_, _, tasks) = read_plan(&root, track)?;
+    let task = tasks
+        .iter()
+        .find(|t| t.slug == slug)
+        .ok_or_else(|| format!("no task '{slug}' in '{track}'"))?;
+    if task.done {
+        return Err(format!("task '{slug}' is already done"));
+    }
+    if let Some(existing) = read_active(&root) {
+        return Err(format!(
+            "claim already active for {}/{} (turn {}/{}). Release first with `driver release` if you want to switch.",
+            existing.track, existing.slug, existing.turn, existing.max_turns
+        ));
+    }
+    let claim = ActiveClaim {
+        track: track.to_string(),
+        slug: slug.to_string(),
+        max_turns,
+        turn: 0,
+        started_at: iso_now(),
+    };
+    write_active(&root, &claim)?;
+    println!(
+        "Claimed {}/{} for up to {max_turns} turns.",
+        claim.track, claim.slug
+    );
+    Ok(())
+}
+
+fn cmd_release() -> Result<(), String> {
+    let root = match find_driver_root() {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    let prev = read_active(&root);
+    delete_active(&root);
+    match prev {
+        Some(c) => println!("Released {}/{}.", c.track, c.slug),
+        None => println!("No active claim."),
+    }
+    Ok(())
+}
+
+fn cmd_claim_status() -> Result<(), String> {
+    let root = find_driver_root()?;
+    match read_active(&root) {
+        Some(c) => {
+            println!(
+                "Active: {}/{} — turn {}/{}, started {}",
+                c.track, c.slug, c.turn, c.max_turns, c.started_at
+            );
+            Ok(())
+        }
+        None => {
+            println!("No active claim.");
+            Ok(())
+        }
+    }
+}
+
+/// The Stop-hook callback.
+/// Exit codes:
+///   0 — allow the agent to stop (no claim, or claim is satisfied).
+///   2 — block the stop (claim is still incomplete; agent must continue).
+fn cmd_gate() -> ExitCode {
+    // No driver/ directory in scope → silently allow stop.
+    let root = match find_driver_root() {
+        Ok(r) => r,
+        Err(_) => return ExitCode::SUCCESS,
+    };
+    let Some(mut claim) = read_active(&root) else {
+        return ExitCode::SUCCESS;
+    };
+    claim.turn += 1;
+
+    // Check whether the task is now done.
+    if let Ok((_, _, tasks)) = read_plan(&root, &claim.track) {
+        if let Some(task) = tasks.iter().find(|t| t.slug == claim.slug) {
+            if task.done {
+                delete_active(&root);
+                return ExitCode::SUCCESS;
+            }
+        } else {
+            // Task slug no longer exists (renamed or removed). Release.
+            delete_active(&root);
+            return ExitCode::SUCCESS;
+        }
+    }
+
+    // Check whether the task was blocked.
+    let blocked_path = root
+        .join("tracks")
+        .join(&claim.track)
+        .join(format!("{}_blocked.md", claim.slug));
+    if blocked_path.exists() {
+        delete_active(&root);
+        return ExitCode::SUCCESS;
+    }
+
+    // Budget check.
+    if claim.turn > claim.max_turns {
+        delete_active(&root);
+        eprintln!(
+            "driver gate: turn budget exceeded for {}/{} ({}/{}). Released claim — agent may stop.",
+            claim.track, claim.slug, claim.turn, claim.max_turns
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    // Persist the bumped turn counter.
+    if let Err(e) = write_active(&root, &claim) {
+        eprintln!("driver gate: failed to update claim: {e}");
+        return ExitCode::SUCCESS;
+    }
+
+    // Block the stop.
+    eprintln!(
+        "Driver task '{slug}' (track {track}) is not done. Run `driver tick {track} {slug}` when complete, or `driver block {track} {slug} \"<question>\"` if you need design input. Turn {turn}/{max}.",
+        slug = claim.slug,
+        track = claim.track,
+        turn = claim.turn,
+        max = claim.max_turns,
+    );
+    ExitCode::from(2)
+}
+
+fn cmd_init_hook() -> Result<(), String> {
+    let bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| "driver".to_string());
+    let snippet = format!(
+        r#"{{
+  "hooks": {{
+    "Stop": [
+      {{
+        "matcher": "",
+        "hooks": [
+          {{ "type": "command", "command": "{bin} gate", "timeout": 10000 }}
+        ]
+      }}
+    ]
+  }}
+}}"#
+    );
+    println!("Paste this into ~/.claude/settings.json (or .claude/settings.json for project-local):");
+    println!();
+    println!("{snippet}");
+    println!();
+    println!("If you already have a hooks section, merge the Stop array entry into it.");
+    println!("Verify with: driver gate ; echo $? (should print 0 when no claim is active)");
+    Ok(())
 }

@@ -127,12 +127,38 @@ If yes, decide. If no, escalate.
 - Subagent dispatch infrastructure (single conversation is the
   manager, `/goal` is the execution primitive)
 
+## The claim / gate / release mechanism
+
+Driver provides its own analogue of `/goal`'s Stop hook, built from
+Driver primitives rather than depending on `/goal`.
+
+A *claim* records `{track, slug, max_turns, turn, started_at}` in
+`driver/.active` when `driver claim <track> <slug>` runs. The Stop
+hook (configured globally via `~/.claude/settings.json`) runs
+`driver gate` after every agent turn end. The gate:
+
+1. Reads `driver/.active`. If missing → exit 0, normal stop.
+2. Increments turn count.
+3. If the task is now ticked in `plan.md` → release + exit 0.
+4. If `<slug>_blocked.md` exists → release + exit 0.
+5. If turn > max_turns → release + exit 0 (with a warning).
+6. Otherwise → exit 2 with a stderr message, blocking the stop.
+
+This buys back `/goal`'s most useful property — "keep working until
+the task is done" — without depending on `/goal`. Skills like
+`/driver:do` can now run a task end-to-end in one command, with no
+paste step. The gate is deterministic (file-state check, no LLM
+evaluator), simpler than `/goal`'s Haiku-judging condition, and the
+escalation channel (`<slug>_blocked.md`) is the same as `/driver:next`
+already uses.
+
+Don't combine with `/goal` in the same session: both set Stop hooks
+and the interaction is undefined. Pick one per session.
+
 ## What Driver hasn't yet added
 
-- `principles.md` template and `/driver:go` skill — pending.
-- `driver rename` CLI command — pending.
-- `<slug>_blocked.md` semantics in CLI (currently per-track) — pending.
-- Skills shelling out to the CLI for parsing — currently each layer
-  parses independently.
+- `driver/principles.md` template — pending, but not blocking.
+- Some skills still re-parse plan.md inline rather than shelling out to
+  the CLI — `/driver:status` already delegates; others should follow.
 
 These are tracked work, not gaps in the design.
