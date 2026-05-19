@@ -43,18 +43,20 @@ enum Cmd {
     },
     /// Start a claim on a task. Configures the Stop hook to keep the
     /// agent working until the task is ticked, halted, or budget is hit.
+    /// `--max-turns` defaults to `ceil(estimate * 1.3 / 5) * 5` when the
+    /// task has an estimate, otherwise 50.
     Claim {
         slug: String,
-        #[arg(long, default_value_t = 50)]
-        max_turns: u32,
+        #[arg(long)]
+        max_turns: Option<u32>,
     },
     /// End the current claim (idempotent).
     Release,
     /// Stop-hook callback. Exits 2 if the active claim is incomplete.
     Gate,
-    /// Print the settings.json snippet for the Driver Stop hook.
-    InitHook,
-    /// Verify the local Driver setup (binary on PATH, hook installed, project layout).
+    /// Verify the local Driver setup (binary on PATH, hook installed,
+    /// project layout). If the Stop hook is missing, prints the
+    /// settings.json snippet to paste.
     Doctor,
     /// Show estimate-vs-actual statistics from driver/.history.jsonl.
     Stats,
@@ -106,8 +108,8 @@ fn main() -> ExitCode {
         Cmd::Untick { slug } => cmd_tick(&slug, false),
         Cmd::Rename { old_slug, new_slug } => cmd_rename(&old_slug, &new_slug),
         Cmd::Claim { slug, max_turns } => cmd_claim(&slug, max_turns),
+        // (cmd_claim resolves max_turns from the plan estimate when None.)
         Cmd::Release => cmd_release(),
-        Cmd::InitHook => cmd_init_hook(),
         Cmd::Doctor => cmd_doctor(),
         Cmd::Stats => cmd_stats(),
         Cmd::Ask {
@@ -701,7 +703,7 @@ fn json_str(s: &str) -> String {
 //
 // The "claim" mechanism is Driver's analogue of `/goal`. A claim records
 // {track, slug, max_turns, turn count} in `driver/.active`. The Stop
-// hook (configured via `driver init-hook`) runs `driver gate` after
+// hook (snippet printed by `driver doctor` when missing) runs `driver gate` after
 // every agent turn. The gate increments the turn counter, releases the
 // claim if the task has been ticked or blocked or budget exhausted, and
 // otherwise exits 2 to prevent the agent from stopping.
@@ -825,7 +827,7 @@ fn days_to_ymd(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-fn cmd_claim(slug: &str, max_turns: u32) -> Result<(), String> {
+fn cmd_claim(slug: &str, max_turns: Option<u32>) -> Result<(), String> {
     let root = project_root()?;
     let (_, _, tasks) = read_plan(&root)?;
     let task = tasks
@@ -841,8 +843,21 @@ fn cmd_claim(slug: &str, max_turns: u32) -> Result<(), String> {
             existing.slug, existing.turn, existing.max_turns
         ));
     }
-    let start_commit = git_head_commit(&root).unwrap_or_default();
     let estimate_at_claim = task.estimate;
+    // Default budget: ceil(estimate * 1.3 / 5) * 5, or 50 if no estimate.
+    let (max_turns, defaulted) = match max_turns {
+        Some(n) => (n, false),
+        None => {
+            let n = estimate_at_claim
+                .map(|e| {
+                    let raw = (e as f64 * 1.3).ceil() as u32;
+                    raw.div_ceil(5) * 5
+                })
+                .unwrap_or(50);
+            (n, true)
+        }
+    };
+    let start_commit = git_head_commit(&root).unwrap_or_default();
     let claim = ActiveClaim {
         slug: slug.to_string(),
         max_turns,
@@ -852,9 +867,17 @@ fn cmd_claim(slug: &str, max_turns: u32) -> Result<(), String> {
         estimate_at_claim,
     };
     write_active(&root, &claim)?;
-    println!("Claimed {} for up to {max_turns} turns.", claim.slug);
+    let how = if defaulted {
+        match estimate_at_claim {
+            Some(e) => format!(" (default: ceil(~{e} × 1.3 / 5) × 5)"),
+            None => " (default: no estimate)".to_string(),
+        }
+    } else {
+        String::new()
+    };
+    println!("Claimed {} for up to {max_turns} turns{how}.", claim.slug);
     if let Some(e) = estimate_at_claim {
-        if max_turns > (e as f64 * 1.5) as u32 {
+        if !defaulted && max_turns > (e as f64 * 1.5) as u32 {
             println!(
                 "  note: budget {max_turns} is {:.1}× plan estimate (~{e}). Scope-growth will be flagged in `driver stats`.",
                 max_turns as f64 / e as f64
@@ -1199,6 +1222,16 @@ fn cmd_doctor() -> Result<(), String> {
     let (hook_ok, hook_detail) = check_stop_hook(&bin);
     report(hook_ok, "Stop hook installed", &hook_detail);
     all_ok &= hook_ok;
+    if !hook_ok {
+        // Print the snippet inline so the user can paste it directly.
+        println!();
+        println!("  Paste this into ~/.claude/settings.json:");
+        for line in stop_hook_snippet(&bin).lines() {
+            println!("    {line}");
+        }
+        println!();
+        println!("  Merge into an existing `hooks` section if you have one.");
+    }
 
     // 3. cwd inside a driver project? Informational — doctor passes
     // for global setup even without a project. Mark with ℹ when absent.
@@ -1249,7 +1282,7 @@ fn check_stop_hook(bin: &str) -> (bool, String) {
     let Ok(text) = fs::read_to_string(&path) else {
         return (
             false,
-            format!("{} not found. Run `driver init-hook` and paste the snippet.", path.display()),
+            format!("{} not found", path.display()),
         );
     };
     // Naive check: does the file mention `<bin> gate` or any `driver gate` command in a Stop hook context?
@@ -1269,10 +1302,7 @@ fn check_stop_hook(bin: &str) -> (bool, String) {
     } else {
         (
             false,
-            format!(
-                "{} has no Stop hook entry for driver. Run `driver init-hook`.",
-                path.display()
-            ),
+            format!("{} has no Stop hook entry for driver", path.display()),
         )
     }
 }
@@ -1282,12 +1312,8 @@ fn report(ok: bool, label: &str, detail: &str) {
     println!("{mark} {label:<28} {detail}");
 }
 
-fn cmd_init_hook() -> Result<(), String> {
-    let bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "driver".to_string());
-    let snippet = format!(
+fn stop_hook_snippet(bin: &str) -> String {
+    format!(
         r#"{{
   "hooks": {{
     "Stop": [
@@ -1300,14 +1326,7 @@ fn cmd_init_hook() -> Result<(), String> {
     ]
   }}
 }}"#
-    );
-    println!("Paste this into ~/.claude/settings.json (or .claude/settings.json for project-local):");
-    println!();
-    println!("{snippet}");
-    println!();
-    println!("If you already have a hooks section, merge the Stop array entry into it.");
-    println!("Verify with: driver gate ; echo $? (should print 0 when no claim is active)");
-    Ok(())
+    )
 }
 
 // ---- principles + ask/questions + tick enforcement ----

@@ -55,8 +55,7 @@ within `plan.md`. See `DESIGN.md` for the full data model.
 cd ~/Code/driver  # or wherever you cloned it
 cargo install --path cli
 ln -sf "$(pwd)/skills" ~/.claude/commands/driver
-driver init-hook              # then paste the snippet into ~/.claude/settings.json
-driver doctor                 # verify the setup
+driver doctor                 # verify the setup; prints the hook snippet if missing
 ```
 
 The CLI is available as `driver` on PATH. Skills appear as
@@ -73,14 +72,17 @@ Driver provides its own analogue of `/goal`: a Stop hook that keeps
 the agent working on a claimed task until completion or escalation.
 
 ```
-driver claim <slug> --max-turns <N>     start a claim
+driver claim <slug> [--max-turns N]     start a claim
 driver gate                              stop-hook callback (do not call directly)
 driver release                           end the current claim
-driver init-hook                         print the settings.json snippet
 ```
 
-After installing the hook (via `driver init-hook` + paste, or by
-adding the snippet to `~/.claude/settings.json` directly), each agent
+`--max-turns` defaults to `ceil(estimate × 1.3 / 5) × 5` from the
+task's plan estimate, falling back to 50 if the task has no estimate.
+Pass it explicitly only when you expect scope growth.
+
+After installing the hook (paste the snippet `driver doctor` prints
+when the hook is missing into `~/.claude/settings.json`), each agent
 turn ends with `driver gate` running. If a claim is active and the
 task isn't ticked or halted, gate exits 2 — Claude Code interprets
 this as "keep working." The claim auto-releases when the task is
@@ -97,11 +99,10 @@ driver tick <slug>                         mark task done
 driver untick <slug>                       mark task open again
 driver rename <old-slug> <new-slug>        rename a task (updates deps + per-task files)
 
-driver claim <slug> --max-turns N          start a claim (Stop hook gate)
+driver claim <slug> [--max-turns N]        start a claim (default budget from plan estimate)
 driver release                             end the current claim
 driver gate                                stop-hook callback
-driver init-hook                           print settings.json snippet
-driver doctor                              verify PATH, hook, project layout
+driver doctor                              verify PATH, hook, project layout (prints snippet if hook missing)
 driver stats                               estimate-vs-actual from .history.jsonl
 
 driver ask <slug> "<question>" [--rule <name>] [--halt] [--context "..."]

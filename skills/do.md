@@ -1,8 +1,8 @@
-Run the next runnable task end-to-end. Claims the task, implements it, ticks when done. The Stop hook (configured via `driver init-hook`) keeps the agent working until the task is finished, halted, or has open questions that prevent ticking.
+Run the next runnable task end-to-end. Claims the task, implements it, ticks when done. The Stop hook keeps the agent working until the task is finished, halted, or has open questions that prevent ticking.
 
 ## Prerequisite check
 
-Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop — the typical fixes are (a) put `~/.cargo/bin` on PATH or symlink the binary, (b) run `driver init-hook` and paste into `~/.claude/settings.json`, (c) `cd` into a project with `driver/plan.md`. After the user fixes the issue (may require a fresh Claude Code session if the hook was just installed), they can re-run `/driver:do`.
+Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop — the typical fixes are (a) put `~/.cargo/bin` on PATH or symlink the binary, (b) paste the snippet doctor printed into `~/.claude/settings.json`, (c) `cd` into a project with `driver/plan.md`. After the user fixes the issue (may require a fresh Claude Code session if the hook was just installed), they can re-run `/driver:do`.
 
 ## Session re-entry
 
@@ -16,7 +16,7 @@ If `driver/principles.md` exists, read it once at the top to understand which fi
 
 2. Check whether `driver/<slug>_design.md` exists. If it doesn't AND the description contains any of: "schema", "Predicate", "Entity", "design pass first", or any other strong signal that the task needs upfront design — write the design doc as the first step. Commit it as one commit before proceeding with implementation.
 
-3. Run `driver claim <slug> --max-turns <ceil(estimate * 1.3 / 5) * 5>`. If claim fails (an existing claim is active), refuse with the error message.
+3. Run `driver claim <slug>`. The CLI defaults `--max-turns` to `ceil(estimate × 1.3 / 5) × 5` from the task's plan estimate; pass `--max-turns N` only if you have reason to override (e.g., you expect scope growth). If claim fails (an existing claim is active), refuse with the error message.
 
 4. Implement the task. Use TaskCreate to track sub-steps if helpful. The Stop hook keeps you on this task until either:
    - You run `driver tick <slug>` (task complete and committed; tick enforces the principles floor + answered-status — see Autonomy section below).
