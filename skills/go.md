@@ -26,20 +26,41 @@ If the project has a `driver/spec.md`, run this phase before entering the loop. 
    - With guidance (`/driver:go "<guidance>"`): pick bullets that match the guidance. State briefly which you picked and which you deferred and why.
    - Without guidance: pick all unmet bullets unless one is clearly out of scope for this iteration.
 
-4. For each chosen bullet, append a task to `driver/plan.md` with the shape:
+4. **Decompose each chosen bullet into tasks.** A bullet describes one *commitment*; a task describes one *commit-worthy slice* of work that satisfies part or all of the commitment. The mapping is not 1:1 in either direction:
+
+   - **One bullet → many tasks** when the bullet enumerates or implies enumeration ("renders the 40 CSS properties listed below"), describes a capability with multiple independent sub-capabilities, or would take more than ~30 turns to close in one go. Default to *one task per atomic capability the bullet implies* — one task per CSS property, one task per table type, one task per output format. All N tasks share the same `[spec: <hash>]`. Use `[depends: <slug>]` to order them when one task's output is another's input (typically: infrastructure first, then the slices that consume it).
+   - **One task → many bullets** when a single slice naturally closes multiple commitments together. Annotate with `[spec: a3f2b1, b7c2d8]`. Don't force this — only do it when the slices truly overlap.
+   - **One bullet → one task** is the default for narrow, atomic commitments ("audit log records every login attempt") — don't manufacture decomposition for its own sake.
+
+   Heuristics for *when to split*:
+   - The bullet contains a list ("for each X"), a count ("40 properties"), or a cross-product ("every combination of A and B"). Split.
+   - The bullet's natural implementation has a clear infrastructure-then-uses shape (the oracle pipeline before per-feature tests). Split into the infrastructure task and the use-site tasks, with `[depends:]` linking them.
+   - Closing the bullet in one task would exceed ~30 turns. Split.
+
+   Heuristics for *when not to split*:
+   - The bullet is one tight, narrow commitment that one PR could close.
+   - The "split" would just be ceremony — the sub-pieces share so much code that doing them together is cheaper than ticking three artificial slugs.
+   - You can't name a falsifiable test boundary between the slices. If the only thing separating slice A from slice B is "I'll do A first, then B," that's a TaskCreate sub-step inside one Driver task, not two tasks.
+
+   When in doubt, **err granular**. Recovery is per-task: a single slice that hits an architectural question halts only itself, not the whole bullet's worth of work. Granular tasks also give `driver stats` real calibration data per slice.
+
+5. Append each task to `driver/plan.md` with this shape:
    ```markdown
-   - [ ] **<slug>** (~K turns) [spec: <hash>]
-     <one-paragraph description of the work, written so an agent firing /goal can act on it>
+   - [ ] **<slug>** (~K turns) [spec: <hash>] [depends: <other-slug>]
+     <one-paragraph description, written so an agent firing /goal can act on it
+     without re-reading the spec bullet. Reference the bullet by name, not just
+     by hash, so the description stands alone.>
    ```
-   - Slug: derive from the bullet name if it has one, otherwise from the body. Keep slugs unique within `plan.md`.
-   - Estimate: your best guess in turns. Don't agonize — `driver stats` will calibrate later.
-   - `[spec: <hash>]`: required. This is the verifiable link back to the spec.
-   - Multi-bullet tasks are fine: `[spec: a3f2b1, b7c2d8]` if one task closes both bullets together.
-   - Add `[depends: <other-slug>]` if the task needs another task first.
+   - Slug: derive from the slice, not from the bullet — `border-em-units`, not `edges` (when the bullet is about all edge units). Slugs must be unique within `plan.md`.
+   - Estimate: your best guess in turns. Don't agonize — `driver stats` will calibrate.
+   - `[spec: <hash>]`: required for every synthesized task. The verifiable link back to the bullet.
+   - `[depends: <slug>]`: use when ordering matters (infrastructure-before-uses, or cross-bullet dependencies). Omit otherwise; most tasks have none.
 
-5. Commit the appended tasks: `git add driver/plan.md && git commit -m "driver: synthesize tasks from spec — <one-line summary>"`.
+6. **State the synthesis briefly to the user** before committing: "I'm synthesizing N tasks from M unmet bullets — [one-line summary]. Closing without input." Don't ask for approval; the spec was the approval. Do this so the user can interrupt if the decomposition obviously went wrong.
 
-6. **Then enter the loop below.** The synthesized tasks now appear in `driver next`.
+7. Commit the appended tasks: `git add driver/plan.md && git commit -m "driver: synthesize <N> tasks from spec — <one-line summary>"`.
+
+8. **Then enter the loop below.** The synthesized tasks now appear in `driver next`.
 
 If `driver spec gap` reports no unmet bullets *and* `plan.md` has no open tasks: the project is fully built against its current spec. Tell the user and stop. They probably want to run `/driver:spec` to extend the spec.
 
