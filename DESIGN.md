@@ -268,20 +268,23 @@ should be gitignored. Sharing `.history.jsonl` across collaborators
 would conflate execution speeds and isn't the goal — each developer
 calibrates their own pace.
 
-## Session re-entry: `driver resume`
+## One overview: `driver status`
 
-`driver resume` is the one-screen view used by `/driver:do` and
-`/driver:go` as a *second* preflight, after `driver doctor`. It prints,
-in order: the active claim (if any), the last five ticks from history,
-all open questions across all open tracks (with unanswered ones
-expanded), and the next runnable task per open track.
+`driver status` is the single command for "what's going on?" It prints,
+in order: the per-track grid (with each track's next-runnable inline),
+the active claim (if any), the last five ticks from history, and all
+unanswered open questions across all open tracks. Sufficient both as
+a daily check and as session re-entry after Claude Code context
+compaction.
 
-The motivating problem is Claude Code context compaction: a long-track
-session may compact mid-flight, the new agent inherits a summary, and
-`driver/.active` plus the questions files are the only ground truth
-left. `driver resume` reconstitutes that ground truth in one
-prominent block so the agent (and the user) can pick up cold without
-re-reading the JSONL.
+An earlier design split this across three commands: `status` for the
+per-track grid, `claim-status` for the active claim, and `resume` for
+the session re-entry composite. Real use exposed the overlap — the
+three views shared most of their data — and forced the user to
+remember which command answered which question. Collapsing into one
+removes that decision; the data is the same, the section headers
+(`== tracks ==`, `== active claim ==`, etc.) keep the output
+scannable.
 
 ## Doctor
 

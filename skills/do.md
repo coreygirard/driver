@@ -6,7 +6,7 @@ Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items
 
 ## Session re-entry
 
-Run `driver resume` once at the top. It prints a one-screen summary: active claim (from a prior session that may have compacted), recent ticks, open questions across all tracks, and the next runnable task per track. Read it before deciding what to do — if there's already an active claim or unanswered questions, surface those first rather than blindly running `driver next`.
+Run `driver status` once at the top. It prints a one-screen summary: the per-track grid (with each track's next-runnable inline), the active claim (from a prior session that may have compacted), recent ticks, and open questions across all tracks. Read it before deciding what to do — if there's already an active claim or unanswered questions, surface those first rather than blindly running `driver next`.
 
 If `driver/principles.md` exists, read it once at the top to understand which file changes will require an open question before tick.
 

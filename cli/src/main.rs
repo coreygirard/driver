@@ -63,8 +63,6 @@ enum Cmd {
     },
     /// End the current claim (idempotent).
     Release,
-    /// Show the current claim, if any.
-    ClaimStatus,
     /// Stop-hook callback. Exits 2 if the active claim is incomplete.
     Gate,
     /// Print the settings.json snippet for the Driver Stop hook.
@@ -107,10 +105,6 @@ enum Cmd {
         index: u32,
         answer: String,
     },
-    /// One-screen session re-entry view: active claim, recent ticks,
-    /// open questions, staged tasks. Run after context compaction
-    /// or when picking a project back up.
-    Resume,
 }
 
 fn main() -> ExitCode {
@@ -139,7 +133,6 @@ fn main() -> ExitCode {
             max_turns,
         } => cmd_claim(&track, &slug, max_turns),
         Cmd::Release => cmd_release(),
-        Cmd::ClaimStatus => cmd_claim_status(),
         Cmd::InitHook => cmd_init_hook(),
         Cmd::Doctor => cmd_doctor(),
         Cmd::Stats { track } => cmd_stats(track.as_deref()),
@@ -158,7 +151,6 @@ fn main() -> ExitCode {
             index,
             answer,
         } => cmd_answer(&track, &slug, index, &answer),
-        Cmd::Resume => cmd_resume(),
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -407,18 +399,27 @@ fn is_runnable(t: &Task, tasks: &[Task], blockers: &HashMap<String, Vec<String>>
 
 // ---- commands ----
 
+/// Single overview command. Replaces the earlier trio of `status`,
+/// `claim-status`, and `resume`: prints the per-track grid (with each
+/// track's next-runnable inline), the active claim, the last few
+/// ticks, and any open questions. Sufficient both as a daily "what's
+/// going on?" check and as a session re-entry view after context
+/// compaction.
 fn cmd_status() -> Result<(), String> {
     let (root, tracks) = read_tracks()?;
+    println!("Driver status — {}", root.display());
     if tracks.is_empty() {
+        println!();
         println!("No tracks. Use /driver:new to create one.");
         return Ok(());
     }
-    println!("Driver status — {}", root.display());
-    println!();
+
+    // == tracks ==
+    println!("\n== tracks ==");
     let id_w = tracks.iter().map(|t| t.id.len()).max().unwrap_or(20);
     for t in &tracks {
         if t.done {
-            println!("done    {:<id_w$}", t.id);
+            println!("  done    {:<id_w$}", t.id);
             continue;
         }
         match read_plan(&root, &t.id) {
@@ -450,12 +451,91 @@ fn cmd_status() -> Result<(), String> {
                     None => "all tasks done — run `driver close`".to_string(),
                 };
                 println!(
-                    "{marker:5}   {:<id_w$}  {complete}/{total} done — {next_str}",
+                    "  {marker:5}   {:<id_w$}  {complete}/{total} done — {next_str}",
                     t.id
                 );
             }
-            Err(e) => println!("open    {:<id_w$}  (plan error: {e})", t.id),
+            Err(e) => println!("  open    {:<id_w$}  (plan error: {e})", t.id),
         }
+    }
+
+    // == active claim ==
+    println!("\n== active claim ==");
+    match read_active(&root) {
+        Some(c) => {
+            let est = c
+                .estimate_at_claim
+                .map(|e| format!(", est ~{e}"))
+                .unwrap_or_default();
+            println!(
+                "  {}/{} — turn {}/{} (started {}{est})",
+                c.track, c.slug, c.turn, c.max_turns, c.started_at
+            );
+        }
+        None => println!("  none"),
+    }
+
+    // == recent ticks ==
+    println!("\n== recent ticks ==");
+    let history = read_history(&root);
+    let recent: Vec<&HistoryRecord> = history.iter().rev().take(5).collect();
+    if recent.is_empty() {
+        println!("  none yet");
+    } else {
+        for r in recent {
+            let turns = match (r.actual_turns, r.estimate) {
+                (Some(a), Some(e)) => format!("{a}t / ~{e}t"),
+                (Some(a), None) => format!("{a}t"),
+                (None, Some(e)) => format!("(no claim) / ~{e}t"),
+                (None, None) => "(no claim)".into(),
+            };
+            println!("  {} [{}/{}]  {turns}", r.ts, r.track, r.slug);
+        }
+    }
+
+    // == open questions ==
+    println!("\n== open questions ==");
+    let mut total_q = 0u32;
+    let mut total_unanswered = 0u32;
+    let open_tracks: Vec<&TrackEntry> = tracks.iter().filter(|t| !t.done).collect();
+    for tr in &open_tracks {
+        let Ok((_, _, tasks)) = read_plan(&root, &tr.id) else {
+            continue;
+        };
+        for task in &tasks {
+            let qs = read_questions(&root, &tr.id, &task.slug);
+            if qs.is_empty() {
+                continue;
+            }
+            let unanswered_here: Vec<&Question> = qs.iter().filter(|q| !q.answered).collect();
+            total_q += qs.len() as u32;
+            total_unanswered += unanswered_here.len() as u32;
+            if unanswered_here.is_empty() {
+                continue;
+            }
+            println!("  [{}/{}]", tr.id, task.slug);
+            for q in &unanswered_here {
+                let mut tags: Vec<String> = Vec::new();
+                if let Some(r) = &q.rule {
+                    tags.push(r.clone());
+                }
+                if q.halt {
+                    tags.push("halt".into());
+                }
+                let tag_str = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", tags.join(", "))
+                };
+                let mark = if q.halt { "✗" } else { "·" };
+                println!("    {mark} Q{}{tag_str}: {}", q.index, q.summary);
+            }
+        }
+    }
+    if total_q == 0 {
+        println!("  none");
+    } else if total_unanswered == 0 {
+        println!("  all {total_q} answered — staged tasks can be re-ticked");
     }
     Ok(())
 }
@@ -1024,140 +1104,6 @@ fn cmd_release() -> Result<(), String> {
         Some(c) => println!("Released {}/{}.", c.track, c.slug),
         None => println!("No active claim."),
     }
-    Ok(())
-}
-
-fn cmd_claim_status() -> Result<(), String> {
-    let root = find_driver_root()?;
-    match read_active(&root) {
-        Some(c) => {
-            println!(
-                "Active: {}/{} — turn {}/{}, started {}",
-                c.track, c.slug, c.turn, c.max_turns, c.started_at
-            );
-            Ok(())
-        }
-        None => {
-            println!("No active claim.");
-            Ok(())
-        }
-    }
-}
-
-/// One-screen session re-entry. Intended for the start of `/driver:do`
-/// or `/driver:go`, after a context compaction, or when picking a
-/// project back up cold.
-fn cmd_resume() -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
-
-    // 1. Active claim.
-    println!("== active claim ==");
-    match read_active(&root) {
-        Some(c) => {
-            let est = c
-                .estimate_at_claim
-                .map(|e| format!(", est ~{e}"))
-                .unwrap_or_default();
-            println!(
-                "  {}/{} — turn {}/{} (started {}{est})",
-                c.track, c.slug, c.turn, c.max_turns, c.started_at
-            );
-        }
-        None => println!("  none"),
-    }
-
-    // 2. Recent ticks (last 5).
-    println!("\n== recent ticks ==");
-    let history = read_history(&root);
-    let recent: Vec<&HistoryRecord> = history.iter().rev().take(5).collect();
-    if recent.is_empty() {
-        println!("  none yet");
-    } else {
-        for r in recent {
-            let turns = match (r.actual_turns, r.estimate) {
-                (Some(a), Some(e)) => format!("{a}t / ~{e}t"),
-                (Some(a), None) => format!("{a}t"),
-                (None, Some(e)) => format!("(no claim) / ~{e}t"),
-                (None, None) => "(no claim)".into(),
-            };
-            println!("  {} [{}/{}]  {turns}", r.ts, r.track, r.slug);
-        }
-    }
-
-    // 3. Open questions across all open tracks.
-    println!("\n== open questions ==");
-    let mut total_q = 0u32;
-    let mut total_unanswered = 0u32;
-    let open_tracks: Vec<&TrackEntry> = tracks.iter().filter(|t| !t.done).collect();
-    for tr in &open_tracks {
-        let Ok((_, _, tasks)) = read_plan(&root, &tr.id) else {
-            continue;
-        };
-        for task in &tasks {
-            let qs = read_questions(&root, &tr.id, &task.slug);
-            if qs.is_empty() {
-                continue;
-            }
-            let unanswered_here: Vec<&Question> = qs.iter().filter(|q| !q.answered).collect();
-            total_q += qs.len() as u32;
-            total_unanswered += unanswered_here.len() as u32;
-            if unanswered_here.is_empty() {
-                continue;
-            }
-            println!("  [{}/{}]", tr.id, task.slug);
-            for q in &unanswered_here {
-                let mut tags: Vec<String> = Vec::new();
-                if let Some(r) = &q.rule {
-                    tags.push(r.clone());
-                }
-                if q.halt {
-                    tags.push("halt".into());
-                }
-                let tag_str = if tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", tags.join(", "))
-                };
-                let mark = if q.halt { "✗" } else { "·" };
-                println!("    {mark} Q{}{tag_str}: {}", q.index, q.summary);
-            }
-        }
-    }
-    if total_q == 0 {
-        println!("  none");
-    } else if total_unanswered == 0 {
-        println!("  all {total_q} answered — staged tasks can be re-ticked");
-    }
-
-    // 4. Next runnable per open track.
-    println!("\n== next runnable ==");
-    let mut any_runnable = false;
-    for tr in &open_tracks {
-        let Ok((_, _, tasks)) = read_plan(&root, &tr.id) else {
-            continue;
-        };
-        let blockers = transitive_blockers(&root, &tr.id, &tasks);
-        let next = tasks
-            .iter()
-            .find(|t| !t.done && is_runnable(t, &tasks, &blockers));
-        match next {
-            Some(t) => {
-                any_runnable = true;
-                let est = t
-                    .estimate
-                    .map(|e| format!(" (~{e}t)"))
-                    .unwrap_or_default();
-                println!("  [{}]  {}{est}", tr.id, t.slug);
-            }
-            None => println!("  [{}]  (none runnable)", tr.id),
-        }
-    }
-    if open_tracks.is_empty() {
-        println!("  no open tracks");
-    } else if !any_runnable && total_unanswered > 0 {
-        println!("  → answer the open questions above to unblock staged tasks");
-    }
-
     Ok(())
 }
 

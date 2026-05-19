@@ -79,7 +79,6 @@ the agent working on a claimed task until completion or escalation.
 driver claim <track> <slug> --max-turns <N>     start a claim
 driver gate                                      stop-hook callback (do not call directly)
 driver release                                   end the current claim
-driver claim-status                              show the current claim
 driver init-hook                                 print the settings.json snippet
 ```
 
@@ -94,7 +93,7 @@ question, or budget exhausted.
 ## CLI commands
 
 ```
-driver status                                show all tracks + next runnable
+driver status                                full overview: tracks, claim, recent ticks, open questions
 driver next [<track>] [--json]               next runnable task
 driver runnable [<track>] [--json]           all currently-runnable tasks
 driver tasks [<track>]                       list tasks with status
@@ -106,12 +105,10 @@ driver close <track>                         verify every task is ticked
 
 driver claim <track> <slug> --max-turns N    start a claim (Stop hook gate)
 driver release                               end the current claim
-driver claim-status                          show the current claim
 driver gate                                  stop-hook callback
 driver init-hook                             print settings.json snippet
 driver doctor                                verify PATH, hook, project layout
 driver stats [<track>]                       estimate-vs-actual from .history.jsonl
-driver resume                                one-screen session re-entry view
 
 driver ask <track> <slug> "<question>" [--rule <name>] [--halt] [--context "..."]
                                              log an open question for batched user review
