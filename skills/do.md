@@ -1,35 +1,31 @@
-Run the next runnable task of a Driver track end-to-end. Claims the task, implements it, ticks when done. The Stop hook (configured via `driver init-hook`) keeps the agent working until the task is finished, blocked, or has open questions that prevent ticking.
+Run the next runnable task end-to-end. Claims the task, implements it, ticks when done. The Stop hook (configured via `driver init-hook`) keeps the agent working until the task is finished, halted, or has open questions that prevent ticking.
 
 ## Prerequisite check
 
-Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop — the typical fixes are (a) put `~/.cargo/bin` on PATH or symlink the binary, (b) run `driver init-hook` and paste into `~/.claude/settings.json`, (c) `cd` into a project with `driver/tracks.md`. After the user fixes the issue (may require a fresh Claude Code session if the hook was just installed), they can re-run `/driver:do`.
+Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop — the typical fixes are (a) put `~/.cargo/bin` on PATH or symlink the binary, (b) run `driver init-hook` and paste into `~/.claude/settings.json`, (c) `cd` into a project with `driver/plan.md`. After the user fixes the issue (may require a fresh Claude Code session if the hook was just installed), they can re-run `/driver:do`.
 
 ## Session re-entry
 
-Run `driver status` once at the top. It prints a one-screen summary: the per-track grid (with each track's next-runnable inline), the active claim (from a prior session that may have compacted), recent ticks, and open questions across all tracks. Read it before deciding what to do — if there's already an active claim or unanswered questions, surface those first rather than blindly running `driver next`.
+Run `driver status` once at the top. It prints the plan summary (with the next-runnable task inline), the active claim (from a prior session that may have compacted), recent ticks, and open questions. Read it before deciding what to do — if there's already an active claim or unanswered questions, surface those first rather than blindly running `driver next`.
 
 If `driver/principles.md` exists, read it once at the top to understand which file changes will require an open question before tick.
 
-## Inputs
-
-Optional positional argument: `<track_id>`. If omitted, the CLI picks the open track whose plan.md was most recently modified.
-
 ## Steps
 
-1. Run `driver next [<track_id>] --json`. Capture `track_id`, `slug`, `estimate`, `depends`, `description`. If the CLI reports "no runnable tasks", the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things — surface those open items to the user and stop.
+1. Run `driver next --json`. Capture `slug`, `estimate`, `depends`, `description`. If the CLI reports "no runnable tasks", the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things — surface those open items to the user and stop.
 
-2. Check whether `driver/tracks/<track_id>/<slug>_design.md` exists. If it doesn't AND the description contains any of: "schema", "CoreIr", "Predicate", "Entity", "design pass first", or any other strong signal that the task needs upfront design — write the design doc as the first step. Commit it as one commit before proceeding with implementation.
+2. Check whether `driver/<slug>_design.md` exists. If it doesn't AND the description contains any of: "schema", "Predicate", "Entity", "design pass first", or any other strong signal that the task needs upfront design — write the design doc as the first step. Commit it as one commit before proceeding with implementation.
 
-3. Run `driver claim <track_id> <slug> --max-turns <ceil(estimate * 1.3 / 5) * 5>`. If claim fails (an existing claim is active), refuse with the error message.
+3. Run `driver claim <slug> --max-turns <ceil(estimate * 1.3 / 5) * 5>`. If claim fails (an existing claim is active), refuse with the error message.
 
 4. Implement the task. Use TaskCreate to track sub-steps if helpful. The Stop hook keeps you on this task until either:
-   - You run `driver tick <track_id> <slug>` (task complete and committed; tick enforces the principles floor + answered-status — see Autonomy section below).
-   - You run `driver ask --halt <track_id> <slug> "<question>"` (you are fully stuck — no progress possible on this task without input). This releases the claim automatically.
+   - You run `driver tick <slug>` (task complete and committed; tick enforces the principles floor + answered-status — see Autonomy section below).
+   - You run `driver ask <slug> --halt "<question>"` (you are fully stuck — no progress possible on this task without input). This releases the claim automatically.
    - The turn budget runs out (gate auto-releases and warns).
 
 5. Before ticking: run the project's test suite (e.g. `cargo fmt --check && cargo test` for Rust; check `CLAUDE.md` or `README.md` for the right commands). All tests must pass with no regressions.
 
-6. Commit the implementation with a clear message that includes the task slug. Then `driver tick <track_id> <slug>` (writes `.history.jsonl`, releases the active claim, enforces gates).
+6. Commit the implementation with a clear message that includes the task slug. Then `driver tick <slug>` (writes `.history.jsonl`, releases the active claim, enforces gates).
 
    If tick refuses with a "principles rule tripped" error, run the suggested `driver ask --rule <name>` command and continue.
 
@@ -37,7 +33,7 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
    - State the question (one or two sentences, not the full file contents).
    - State the context the user needs to weigh in: what's the trade-off, what alternatives were considered, what's your recommendation.
    - Pause for the user to discuss. They may push back, ask for alternatives, or want more detail. Respond conversationally.
-   - When the user has decided, record the answer with `driver answer <track_id> <slug> <Q#> "<decision>"`. The decision can be terse — the conversation captures the reasoning, the file records the verdict.
+   - When the user has decided, record the answer with `driver answer <slug> <Q#> "<decision>"`. The decision can be terse — the conversation captures the reasoning, the file records the verdict.
    - Move to the next question.
 
    After all questions are answered, re-run `driver tick`. It should succeed (assuming no new floor trips). Proceed to step 7.
@@ -59,10 +55,10 @@ There are two layers of escalation. They compose: the floor is leak-proof, the c
 **Mechanical floor (enforced by `driver tick`).** `driver/principles.md` lists rules. Each rule names a file glob; touching any matching file during a claim makes the rule "tripped." Tick refuses unless you have logged a question with that rule tag:
 
 ```
-driver ask <track> <slug> --rule <name> "<question>" --context "..."
+driver ask <slug> --rule <name> "<question>" --context "..."
 ```
 
-You can't bypass this. If you touch `src/core_ir.rs` (or whatever paths are listed), you must ask.
+You can't bypass this. If you touch a path on a tripped glob, you must ask.
 
 **Self-classification ceiling (your judgment).** Use `driver ask` *without* `--rule` for anything that:
 - locks multiple future tasks into a pattern,
@@ -70,15 +66,10 @@ You can't bypass this. If you touch `src/core_ir.rs` (or whatever paths are list
 - might surprise the user ("they could have wanted this differently"),
 - changes how concepts are represented (entity shape, fixture format, modelling conventions).
 
-Examples of self-classified asks from real runs:
-- "Store adjective modifiers as concept-ids vs full Entity records?"
-- "Approximate DE mixed declension as weak?"
-- "48 declension cells vs 72 with mixed paradigm?"
-
-You can keep working on parts of the task that don't depend on the answer. The question waits for the user. If you genuinely can't make further progress, re-run with `--halt` (`driver ask --halt <track> <slug> "..."`) — that releases the claim and marks the task halted until answered.
+You can keep working on parts of the task that don't depend on the answer. The question waits for the user. If you genuinely can't make further progress, re-run with `--halt` (`driver ask <slug> --halt "..."`) — that releases the claim and marks the task halted until answered.
 
 **What stays out of `ask` entirely.** Reversible local calls — naming, internal helpers, test fixture content within the patterns the description names, library choices that don't lock long-term — just do them, and let the commit message carry the rationale if it's non-obvious. The user reviews via `git log` / `git diff` after the run.
 
 **When in doubt: ask.** Asking is cheap (one CLI call, doesn't halt). The user will see all questions batched at the end of `/driver:go`. Over-asking is fine; under-asking is what we're trying to prevent.
 
-**Do not modify other tracks' plan.md, do not skip the test run, do not tick a task whose tests don't pass.**
+**Do not skip the test run, do not tick a task whose tests don't pass.**

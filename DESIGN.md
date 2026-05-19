@@ -5,7 +5,7 @@ doesn't re-derive them from scratch.
 
 ## Purpose
 
-Driver is a minimal track planner for `/goal`-driven work in Claude
+Driver is a minimal task planner for `/goal`-driven work in Claude
 Code. It exists because the existing alternatives (Conductor,
 Conductor2) carry more structure than a single-human + single-agent
 workflow actually needs.
@@ -22,10 +22,11 @@ Two pieces:
 
 - **`cli/`** — a small Rust binary that parses `driver/` project
   files and performs mechanical operations (list runnable tasks, tick
-  task as done, close a track).
+  task as done, gate the Stop hook).
 - **`skills/`** — Claude Code slash commands that wrap the CLI and
-  add LLM-judgment features (drafting `/goal` prompts, scaffolding
-  new tracks, deciding when a task needs an upfront design doc).
+  add LLM-judgment features (scaffolding `plan.md`, deciding when a
+  task needs an upfront design doc, conversational question
+  walkthroughs).
 
 Either piece is usable without the other.
 
@@ -34,30 +35,28 @@ Either piece is usable without the other.
 ```
 <project>/
   driver/
-    tracks/
-      <YYYYMMDD>-<slug>/
-        plan.md                    ← required
-        spec.md                    ← optional ("why")
-        <task-slug>_design.md      ← optional, per task
-        <task-slug>_questions.md   ← optional, per task; open questions (incl. halt)
-    principles.md                  ← optional, project-wide rules
+    plan.md                ← required; the single evolving plan
+    <task-slug>_design.md  ← optional, per task
+    <task-slug>_questions.md  ← optional, per task; open questions (incl. halt)
+    principles.md          ← optional; project-wide rules
 ```
 
-## Registry: derived, not maintained
+## One plan, no tracks
 
-There's no `tracks.md`. The registry is a filesystem walk: a track
-exists iff `driver/tracks/<id>/plan.md` exists, and it's done iff
-every task in that plan.md is ticked. The summary shown by
-`driver status` comes from plan.md's `# Heading` line.
+Driver is a single evolving `plan.md`. There are no per-chunk
+directories, no registry file, no "open the next track" ritual.
+Completed tasks stay in `plan.md` as ticked history; new work appends
+bullets. Slugs are unique within the file.
 
-The earlier design had a hand-maintained `tracks.md`. Real dogfooding
-exposed the obvious drift problem: closing a track required editing
-two files (plan.md ticks, plus the `[x]` in tracks.md), so the
-registry was the single source of bugs and the only authoritative
-state was redundant with plan.md anyway. Derivation removes the file,
-removes one CLI write path, and shrinks `/driver:new` and
-`/driver:close` to filesystem-only operations with no second-source
-to commit.
+An earlier design had a per-track filesystem layout
+(`driver/tracks/<YYYYMMDD>-<slug>/plan.md` + sibling files). Real use
+exposed several costs: every per-task CLI command carried a `<track>`
+argument; `/driver:new` performed a closure ritual that paralleled
+plan.md but lived elsewhere; `[depends: …]` couldn't cross "chunk"
+boundaries even when later work genuinely required earlier
+infrastructure. The grouping affordance tracks gave (visually
+clustering related work) is recovered by optional `## Section`
+markdown headers in `plan.md`, with no parser awareness needed.
 
 ## Plan format: task-flat DAG
 
@@ -66,7 +65,7 @@ There are no "phases" or sub-bullets; if a task is too big, split it
 into multiple tasks.
 
 ```markdown
-# Track name
+# Project name
 
 Intro paragraph: what, why.
 
@@ -89,8 +88,8 @@ Intro paragraph: what, why.
 Slugs are readable. UUIDs would solve a collision problem that
 single-author markdown plans don't actually have, and pay for it with
 unreadable `[depends: 5f3e2a1b-…]` annotations. Rename safety is
-handled by `driver rename <track> <old-slug> <new-slug>`, which
-updates plan.md and renames associated files.
+handled by `driver rename <old-slug> <new-slug>`, which updates
+plan.md and renames associated per-task files.
 
 If Driver ever gets multi-author concurrent edits or cross-project
 references, UUIDs become the right call. Driver isn't there.
@@ -109,9 +108,6 @@ tasks until none remain."
 
 A task is open or done. No "in progress" middle state — by definition
 the next runnable open task is the one currently being worked on.
-
-A track is open or done. A track is closeable when every task in its
-plan.md is done.
 
 ## Autonomy rubric: mechanical floor + self-classification ceiling
 
@@ -143,12 +139,12 @@ into the skill.
 
 ### Self-classification ceiling (agent judgment, additive)
 
-`driver ask <track> <slug> "<question>" --context "..."` *without*
-`--rule` is the channel for things the agent thinks are
-architecturally consequential but no glob caught: lossy
-approximations, representation choices, cross-language symmetry
-breaks, naming a public concept. The agent's judgment; over-asking is
-encouraged because asking is cheap (one CLI call, doesn't halt).
+`driver ask <slug> "<question>" --context "..."` *without* `--rule` is
+the channel for things the agent thinks are architecturally
+consequential but no glob caught: lossy approximations, representation
+choices, cross-language symmetry breaks, naming a public concept. The
+agent's judgment; over-asking is encouraged because asking is cheap
+(one CLI call, doesn't halt).
 
 ### The "ask, don't block" loop — and one channel for halt
 
@@ -159,7 +155,7 @@ agent moves on), other tasks can still be claimed and worked.
 into a *conversational walkthrough* with the user over the
 accumulated open questions — one at a time, with context and the
 agent's recommendation, pausing for discussion. When the user decides,
-the skill records the answer via `driver answer <track> <slug> <Q#>
+the skill records the answer via `driver answer <slug> <Q#>
 "<decision>"`. Once all answered, `/driver:go` resumes the loop with
 the now-runnable staged tasks.
 
@@ -174,9 +170,7 @@ There used to be a separate `driver block` / `<slug>_blocked.md`
 channel. Real dogfooding never fired it — `ask` covered every case —
 and "task with unanswered halt-question" gives the same
 downstream-unreachable semantics with one fewer file convention and
-one fewer CLI command. The halt flag rides on the same question that
-records *why* the task halted, so the audit trail is no worse than
-the old `_blocked.md` sentinel.
+one fewer CLI command.
 
 ### Reversible local calls stay out of `ask`
 
@@ -186,37 +180,31 @@ message carry the rationale if it's non-obvious. The user reviews via
 `git log` / `git diff` after the run and can `git revert` anything
 they disagree with.
 
-An earlier design had a per-track `decisions.md` that aggregated
-these. Dogfooding showed it was a leakage: about half the calls
-landed in commit messages anyway, so the file gave a false sense of
-completeness and added a second classification axis ("is this
-ask-worthy, decisions.md-worthy, or just-commit-worthy?") that
-nobody needed. Removed.
-
 ## What Driver deliberately doesn't have
 
-- `tracks.md` registry (derived from the filesystem now)
-- `metadata.json` per track
-- per-track `index.md`
-- per-track `notes.md`
-- per-track `decisions.md`
+- `tracks.md` registry (and `tracks/<id>/` per-chunk folders) — one
+  evolving `plan.md` instead
+- `metadata.json` per task
+- per-track `index.md`, `notes.md`, `decisions.md`
 - File resolution protocol or default-path tables
 - Project-level `product.md`, `tech-stack.md`, `workflow.md`
-- Multiple track types (`feature`, `chore`, `bug`)
-- `[~]` "in-progress" state in registries
+- Multiple task types (`feature`, `chore`, `bug`)
+- `[~]` "in-progress" state
 - Sub-task bullets within tasks (use TaskCreate during a `/goal`)
 - Subagent dispatch infrastructure (single conversation is the
   manager, `/goal` is the execution primitive)
+- A `close` verb — done-ness is just "all tasks ticked"
 
 ## The claim / gate / release mechanism
 
 Driver provides its own analogue of `/goal`'s Stop hook, built from
 Driver primitives rather than depending on `/goal`.
 
-A *claim* records `{track, slug, max_turns, turn, started_at}` in
-`driver/.active` when `driver claim <track> <slug>` runs. The Stop
-hook (configured globally via `~/.claude/settings.json`) runs
-`driver gate` after every agent turn end. The gate:
+A *claim* records `{slug, max_turns, turn, started_at,
+estimate_at_claim, start_commit}` in `driver/.active` when
+`driver claim <slug>` runs. The Stop hook (configured globally via
+`~/.claude/settings.json`) runs `driver gate` after every agent turn
+end. The gate:
 
 1. Reads `driver/.active`. If missing → exit 0, normal stop.
 2. Increments turn count.
@@ -229,9 +217,7 @@ This buys back `/goal`'s most useful property — "keep working until
 the task is done" — without depending on `/goal`. Skills like
 `/driver:do` can now run a task end-to-end in one command, with no
 paste step. The gate is deterministic (file-state check, no LLM
-evaluator), simpler than `/goal`'s Haiku-judging condition, and the
-escalation channel (`driver ask --halt`) is the same one the rest of
-Driver uses.
+evaluator), simpler than `/goal`'s Haiku-judging condition.
 
 Don't combine with `/goal` in the same session: both set Stop hooks
 and the interaction is undefined. Pick one per session.
@@ -239,7 +225,7 @@ and the interaction is undefined. Pick one per session.
 ## Calibration: history + stats
 
 `driver tick` *always* appends to `driver/.history.jsonl` when ticking
-to done. The record carries `{ts, track, slug, estimate, actual_turns,
+to done. The record carries `{ts, slug, estimate, actual_turns,
 budget, estimate_at_claim, status}`:
 
 - With a matching active claim, all fields are populated; tick also
@@ -253,10 +239,10 @@ The earlier "tick only records under a claim" rule lost calibration
 data silently — a real run shipped four tasks with an empty history
 file. Always-record + visible warning makes the failure mode legible.
 
-`driver stats [<track>]` reports mean/median turns (over records that
-have `actual_turns`), mean actual/est ratio, and the three biggest
-over- and under-estimates. It also surfaces **scope-growth**: tasks
-where the claim budget or actual turns exceeded `estimate_at_claim` by
+`driver stats` reports mean/median turns (over records that have
+`actual_turns`), mean actual/est ratio, and the three biggest over-
+and under-estimates. It also surfaces **scope-growth**: tasks where
+the claim budget or actual turns exceeded `estimate_at_claim` by
 ≥1.5×. That catches mid-flight estimate bumps even when the user
 edited plan.md during the run.
 
@@ -271,20 +257,18 @@ calibrates their own pace.
 ## One overview: `driver status`
 
 `driver status` is the single command for "what's going on?" It prints,
-in order: the per-track grid (with each track's next-runnable inline),
-the active claim (if any), the last five ticks from history, and all
-unanswered open questions across all open tracks. Sufficient both as
-a daily check and as session re-entry after Claude Code context
-compaction.
+in order: the plan summary (with next-runnable inline), the active
+claim (if any), the last five ticks from history, and all unanswered
+open questions. Sufficient both as a daily check and as session
+re-entry after Claude Code context compaction.
 
-An earlier design split this across three commands: `status` for the
+An earlier design split this across three commands: `status` for a
 per-track grid, `claim-status` for the active claim, and `resume` for
 the session re-entry composite. Real use exposed the overlap — the
 three views shared most of their data — and forced the user to
 remember which command answered which question. Collapsing into one
 removes that decision; the data is the same, the section headers
-(`== tracks ==`, `== active claim ==`, etc.) keep the output
-scannable.
+(`== plan ==`, `== active claim ==`, etc.) keep the output scannable.
 
 ## Doctor
 
@@ -294,8 +278,8 @@ scannable.
 - `driver` is on PATH (catches the common `~/.cargo/bin` issue).
 - `~/.claude/settings.json` exists and contains a Stop hook entry
   invoking `driver gate`.
-- The current working directory is inside a project with a
-  `driver/tracks/` or `driver/principles.md`.
+- The current working directory is inside a `driver/` project
+  (i.e. has `plan.md` or `principles.md`).
 - Reports the active claim if any.
 
 Exits 0 if global setup is OK (project not required); exits 1 if any
@@ -306,8 +290,6 @@ of the global checks fails.
 - Multi-`*` globs in principles.md (e.g. `src/**/*.rs`). v1 supports
   one `*` per pattern, which covers exact-file rules and one-level
   wildcards like `testdata/eval/*.json`.
-- Some skills still re-parse plan.md inline rather than shelling out to
-  the CLI — `/driver:status` already delegates; others should follow.
 - CLI tests. `cli/src/main.rs` is one file with no `#[cfg(test)]`
   module yet. The parsers (`parse_tasks`, `parse_depends`,
   glob-matching, `rewrite_depends`, transitive-blocker walk) and the

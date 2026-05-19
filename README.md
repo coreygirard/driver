@@ -1,17 +1,17 @@
 # driver
 
-A minimal track planner for Claude Code, designed to feel native to
+A minimal task planner for Claude Code, designed to feel native to
 `/goal`-style autonomous work without inheriting Conductor's ceremony.
 
 Driver is two pieces:
 
 - **`cli/`** — a small Rust binary (`driver`) that handles all
   mechanical operations on a project's `driver/` directory: parsing
-  plans, ticking tasks, listing the next runnable task, gating Stop
-  hooks, closing tracks.
+  `plan.md`, ticking tasks, listing the next runnable task, gating the
+  Stop hook.
 - **`skills/`** — Claude Code slash commands (`/driver:new`,
-  `/driver:status`, `/driver:close`, `/driver:do`, `/driver:go`)
-  that wrap the CLI for interactive use.
+  `/driver:status`, `/driver:do`, `/driver:go`) that wrap the CLI for
+  interactive use.
 
 Either piece can be used without the other.
 
@@ -20,25 +20,22 @@ Either piece can be used without the other.
 ```
 <project>/
   driver/
-    tracks/
-      <YYYYMMDD>-<slug>/
-        plan.md                    ← required
-        spec.md                    ← optional; the "why"
-        <slug>_design.md           ← optional; per-task design notes
-        <slug>_questions.md        ← optional; open questions (incl. halt)
-    principles.md                  ← optional; project-wide rules
-    .active                        ← runtime; the current claim (gitignored)
-    .history.jsonl                 ← runtime; tick log (gitignored)
+    plan.md                ← required; the single evolving plan
+    <slug>_design.md       ← optional, per task; design notes
+    <slug>_questions.md    ← optional, per task; open questions (incl. halt)
+    principles.md          ← optional; project-wide rules
+    .active                ← runtime; current claim (gitignored)
+    .history.jsonl         ← runtime; tick log (gitignored)
 ```
 
-The track registry is **derived from the filesystem** — a track exists
-iff `driver/tracks/<id>/plan.md` exists; it's done iff every task in
-that plan is ticked. There's no `tracks.md` to keep in sync.
+Driver is **one evolving plan** — there are no per-track folders, no
+registry file to maintain. New work appends bullets to `plan.md`;
+completed work stays as ticked history.
 
 Plans look like:
 
 ```markdown
-# Track name
+# Project name
 
 2–3 sentences: what and why.
 
@@ -49,8 +46,8 @@ Plans look like:
   Description paragraph.
 ```
 
-A task is done when its checkbox is ticked. A track is done when every
-task is. See `DESIGN.md` for the full data model.
+A task is done when its checkbox is ticked. Slugs must be unique
+within `plan.md`. See `DESIGN.md` for the full data model.
 
 ## Install
 
@@ -76,10 +73,10 @@ Driver provides its own analogue of `/goal`: a Stop hook that keeps
 the agent working on a claimed task until completion or escalation.
 
 ```
-driver claim <track> <slug> --max-turns <N>     start a claim
-driver gate                                      stop-hook callback (do not call directly)
-driver release                                   end the current claim
-driver init-hook                                 print the settings.json snippet
+driver claim <slug> --max-turns <N>     start a claim
+driver gate                              stop-hook callback (do not call directly)
+driver release                           end the current claim
+driver init-hook                         print the settings.json snippet
 ```
 
 After installing the hook (via `driver init-hook` + paste, or by
@@ -93,26 +90,25 @@ question, or budget exhausted.
 ## CLI commands
 
 ```
-driver status                                full overview: tracks, claim, recent ticks, open questions
-driver next [<track>] [--json]               next runnable task
-driver tasks [<track>]                       list tasks with status (done/blocked/runable/waiting)
-driver tick <track> <slug>                   mark task done
-driver untick <track> <slug>                 mark task open again
-driver rename <track> <old-slug> <new-slug>  rename a task (updates deps)
-driver close <track>                         verify every task is ticked
+driver status                              full overview: plan, claim, recent ticks, open questions
+driver next [--json]                       next runnable task
+driver tasks                               list all tasks with status (done/blocked/runable/waiting)
+driver tick <slug>                         mark task done
+driver untick <slug>                       mark task open again
+driver rename <old-slug> <new-slug>        rename a task (updates deps + per-task files)
 
-driver claim <track> <slug> --max-turns N    start a claim (Stop hook gate)
-driver release                               end the current claim
-driver gate                                  stop-hook callback
-driver init-hook                             print settings.json snippet
-driver doctor                                verify PATH, hook, project layout
-driver stats [<track>]                       estimate-vs-actual from .history.jsonl
+driver claim <slug> --max-turns N          start a claim (Stop hook gate)
+driver release                             end the current claim
+driver gate                                stop-hook callback
+driver init-hook                           print settings.json snippet
+driver doctor                              verify PATH, hook, project layout
+driver stats                               estimate-vs-actual from .history.jsonl
 
-driver ask <track> <slug> "<question>" [--rule <name>] [--halt] [--context "..."]
-                                             log an open question for batched user review
-                                             --halt marks the task halted until answered
-driver questions [<track>]                   list all open questions (answered + unanswered)
-driver answer <track> <slug> <Q#> "<answer>" record a decision on question Q#
+driver ask <slug> "<question>" [--rule <name>] [--halt] [--context "..."]
+                                           log an open question for batched user review
+                                           --halt marks the task halted until answered
+driver questions                           list all open questions (answered + unanswered)
+driver answer <slug> <Q#> "<answer>"       record a decision on question Q#
 ```
 
 `driver tick` always records a completion to `driver/.history.jsonl`.
@@ -124,18 +120,17 @@ turn-based stats, and flags scope-growth (budget or actual ≥1.5× the
 plan estimate captured at claim time). Both `.active` and
 `.history.jsonl` are gitignored — they're per-developer runtime state.
 
-Run from anywhere inside a project — `driver` walks up looking for a
-`driver/tracks/` directory (or `driver/principles.md`).
+Run from anywhere inside a project — `driver` walks up looking for
+`driver/plan.md` (or `driver/principles.md`).
 
 ## Skills
 
 | Slash command | What it does |
 |---|---|
-| `/driver:new` | Asks for slug + summary + task outline; scaffolds `tracks/<id>/plan.md`; commits |
+| `/driver:new` | Asks for title + task outline; scaffolds `plan.md`; commits |
 | `/driver:status` | Wrapper around `driver status` |
 | `/driver:do` | Runs the next runnable task end-to-end (Stop-hook safety net) |
-| `/driver:go` | Runs *all* runnable tasks until the track is done or halted |
-| `/driver:close` | Verifies a track when all its tasks are ticked |
+| `/driver:go` | Runs *all* runnable tasks until done or halted |
 
 ## Principles + the autonomy floor
 
@@ -143,7 +138,7 @@ Driver's autonomy rubric has two layers:
 
 - **Mechanical floor**: optional `driver/principles.md` lists rules with
   file globs. If a task's diff (since claim start) touches a triggered
-  file, `driver tick` refuses unless an `driver ask --rule <name>`
+  file, `driver tick` refuses unless a `driver ask --rule <name>`
   question is logged. Leak-proof — the agent can't bypass it.
 - **Self-classification ceiling**: agent uses `driver ask` *without*
   `--rule` for things that are architecturally consequential but not

@@ -1,9 +1,9 @@
 // driver — minimal track planner.
 //
 // Operates on files under driver/ in the current project. Discovers the
-// project root by walking up from the cwd looking for a driver/tracks/
-// directory (or driver/principles.md). The track registry is derived
-// from the filesystem — there's no tracks.md to parse.
+// project root by walking up from the cwd looking for driver/plan.md
+// (or driver/principles.md). Driver is one evolving plan.md — no
+// per-track folders, no registry file.
 //
 // See DESIGN.md in the driver repo for the data model.
 
@@ -23,32 +23,27 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show all tracks and their next runnable task per track.
+    /// Full overview: plan, claim, recent ticks, open questions.
     Status,
-    /// Print the next runnable task of a track.
+    /// Print the next runnable task.
     Next {
-        track: Option<String>,
         #[arg(long)]
         json: bool,
     },
-    /// List all tasks in a track with their status.
-    Tasks { track: Option<String> },
+    /// List all tasks with their status.
+    Tasks,
     /// Tick a task as done.
-    Tick { track: String, slug: String },
+    Tick { slug: String },
     /// Untick a task (mark open again).
-    Untick { track: String, slug: String },
+    Untick { slug: String },
     /// Rename a task: updates plan.md and renames <slug>_* files.
     Rename {
-        track: String,
         old_slug: String,
         new_slug: String,
     },
-    /// Close a track if every task is ticked.
-    Close { track: String },
     /// Start a claim on a task. Configures the Stop hook to keep the
-    /// agent working until the task is ticked, blocked, or budget is hit.
+    /// agent working until the task is ticked, halted, or budget is hit.
     Claim {
-        track: String,
         slug: String,
         #[arg(long, default_value_t = 50)]
         max_turns: u32,
@@ -62,7 +57,7 @@ enum Cmd {
     /// Verify the local Driver setup (binary on PATH, hook installed, project layout).
     Doctor,
     /// Show estimate-vs-actual statistics from driver/.history.jsonl.
-    Stats { track: Option<String> },
+    Stats,
     /// Append an open question to <slug>_questions.md. By default
     /// non-blocking — the agent can keep working on parts that don't
     /// depend on the answer. Pass `--halt` for "fully stuck": that
@@ -70,7 +65,6 @@ enum Cmd {
     /// makes dependents transitively unreachable until the question is
     /// answered.
     Ask {
-        track: String,
         slug: String,
         /// Question text (one sentence).
         question: String,
@@ -82,16 +76,15 @@ enum Cmd {
         #[arg(long)]
         context: Option<String>,
         /// Mark the question as a hard halt: task can't make further
-        /// progress until answered. Replaces the old `driver block`.
+        /// progress until answered.
         #[arg(long)]
         halt: bool,
     },
-    /// List open questions across the project (or one track).
-    Questions { track: Option<String> },
+    /// List open questions across the project.
+    Questions,
     /// Record an answer to a logged question. Replaces `_pending_` on
     /// the matching Q's answer line.
     Answer {
-        track: String,
         slug: String,
         /// 1-based question index, as shown by `driver questions`.
         index: u32,
@@ -107,40 +100,29 @@ fn main() -> ExitCode {
     }
     let result = match cli.command {
         Cmd::Status => cmd_status(),
-        Cmd::Next { track, json } => cmd_next(track, json),
-        Cmd::Tasks { track } => cmd_tasks(track),
-        Cmd::Tick { track, slug } => cmd_tick(&track, &slug, true),
-        Cmd::Untick { track, slug } => cmd_tick(&track, &slug, false),
-        Cmd::Rename {
-            track,
-            old_slug,
-            new_slug,
-        } => cmd_rename(&track, &old_slug, &new_slug),
-        Cmd::Close { track } => cmd_close(&track),
-        Cmd::Claim {
-            track,
-            slug,
-            max_turns,
-        } => cmd_claim(&track, &slug, max_turns),
+        Cmd::Next { json } => cmd_next(json),
+        Cmd::Tasks => cmd_tasks(),
+        Cmd::Tick { slug } => cmd_tick(&slug, true),
+        Cmd::Untick { slug } => cmd_tick(&slug, false),
+        Cmd::Rename { old_slug, new_slug } => cmd_rename(&old_slug, &new_slug),
+        Cmd::Claim { slug, max_turns } => cmd_claim(&slug, max_turns),
         Cmd::Release => cmd_release(),
         Cmd::InitHook => cmd_init_hook(),
         Cmd::Doctor => cmd_doctor(),
-        Cmd::Stats { track } => cmd_stats(track.as_deref()),
+        Cmd::Stats => cmd_stats(),
         Cmd::Ask {
-            track,
             slug,
             question,
             rule,
             context,
             halt,
-        } => cmd_ask(&track, &slug, &question, rule.as_deref(), context.as_deref(), halt),
-        Cmd::Questions { track } => cmd_questions(track.as_deref()),
+        } => cmd_ask(&slug, &question, rule.as_deref(), context.as_deref(), halt),
+        Cmd::Questions => cmd_questions(),
         Cmd::Answer {
-            track,
             slug,
             index,
             answer,
-        } => cmd_answer(&track, &slug, index, &answer),
+        } => cmd_answer(&slug, index, &answer),
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -158,66 +140,15 @@ fn find_driver_root() -> Result<PathBuf, String> {
     let mut dir = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
     loop {
         let candidate = dir.join("driver");
-        if candidate.join("tracks").is_dir() || candidate.join("principles.md").exists() {
+        if candidate.join("plan.md").exists() || candidate.join("principles.md").exists() {
             return Ok(candidate);
         }
         if !dir.pop() {
             return Err(
-                "no driver/ project found in this directory or any parent (expected driver/tracks/ or driver/principles.md)".into(),
+                "no driver/ project found in this directory or any parent (expected driver/plan.md or driver/principles.md)".into(),
             );
         }
     }
-}
-
-// ---- tracks (derived from the filesystem) ----
-
-#[derive(Debug, Clone)]
-struct TrackEntry {
-    done: bool,
-    id: String,
-    #[allow(dead_code)]
-    summary: String,
-}
-
-/// Enumerate tracks by walking `driver/tracks/`. A track is any
-/// directory containing a `plan.md`; it's done iff every task in that
-/// plan.md is ticked. The summary is the first `# Heading` line of
-/// plan.md, less the leading hash. Sorted ascending by id, which
-/// (because ids are `YYYYMMDD-<slug>`) gives chronological order.
-fn read_tracks() -> Result<(PathBuf, Vec<TrackEntry>), String> {
-    let root = find_driver_root()?;
-    let tracks_dir = root.join("tracks");
-    if !tracks_dir.is_dir() {
-        return Ok((root, Vec::new()));
-    }
-    let mut tracks: Vec<TrackEntry> = Vec::new();
-    let entries = fs::read_dir(&tracks_dir)
-        .map_err(|e| format!("read {}: {e}", tracks_dir.display()))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let plan = path.join("plan.md");
-        if !plan.exists() {
-            continue;
-        }
-        let id = match path.file_name().and_then(|n| n.to_str()) {
-            Some(s) => s.to_string(),
-            None => continue,
-        };
-        let text = fs::read_to_string(&plan).unwrap_or_default();
-        let lines: Vec<String> = text.lines().map(String::from).collect();
-        let tasks = parse_tasks(&lines).unwrap_or_default();
-        let done = !tasks.is_empty() && tasks.iter().all(|t| t.done);
-        let summary = lines
-            .iter()
-            .find_map(|l| l.strip_prefix("# ").map(|s| s.trim().to_string()))
-            .unwrap_or_default();
-        tracks.push(TrackEntry { done, id, summary });
-    }
-    tracks.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok((root, tracks))
 }
 
 // ---- plan.md ----
@@ -226,7 +157,6 @@ fn read_tracks() -> Result<(PathBuf, Vec<TrackEntry>), String> {
 struct Task {
     done: bool,
     slug: String,
-    #[allow(dead_code)]
     estimate: Option<u32>,
     depends: Vec<String>,
     /// Line index of the task's first line in the source.
@@ -234,15 +164,25 @@ struct Task {
     description: String,
 }
 
-fn read_plan(root: &Path, track_id: &str) -> Result<(PathBuf, Vec<String>, Vec<Task>), String> {
-    let plan_md = root.join("tracks").join(track_id).join("plan.md");
+/// Read `driver/plan.md`. Returns the resolved path, the raw lines
+/// (for write-back), and the parsed task list.
+fn read_plan(root: &Path) -> Result<(PathBuf, Vec<String>, Vec<Task>), String> {
+    let plan_md = root.join("plan.md");
     if !plan_md.exists() {
-        return Err(format!("no plan.md for track '{track_id}'"));
+        return Err(format!(
+            "no plan.md at {}",
+            plan_md.display()
+        ));
     }
     let text = fs::read_to_string(&plan_md).map_err(|e| format!("read plan.md: {e}"))?;
     let lines: Vec<String> = text.lines().map(String::from).collect();
     let tasks = parse_tasks(&lines)?;
     Ok((plan_md, lines, tasks))
+}
+
+/// Convenience: just the project root.
+fn project_root() -> Result<PathBuf, String> {
+    find_driver_root()
 }
 
 fn parse_tasks(lines: &[String]) -> Result<Vec<Task>, String> {
@@ -326,19 +266,14 @@ fn parse_depends(s: &str) -> Vec<String> {
 // ---- DAG semantics ----
 
 /// A task is directly blocked iff its questions file has at least one
-/// unanswered halt-marked question. Replaces the old `<slug>_blocked.md`
-/// sentinel file — halt is now a flag on a `driver ask`-logged question.
-fn directly_blocked(root: &Path, track: &str, slug: &str) -> bool {
-    read_questions(root, track, slug)
+/// unanswered halt-marked question.
+fn directly_blocked(root: &Path, slug: &str) -> bool {
+    read_questions(root, slug)
         .iter()
         .any(|q| q.halt && !q.answered)
 }
 
-fn transitive_blockers(
-    root: &Path,
-    track: &str,
-    tasks: &[Task],
-) -> HashMap<String, Vec<String>> {
+fn transitive_blockers(root: &Path, tasks: &[Task]) -> HashMap<String, Vec<String>> {
     // Returns slug -> list of upstream blocked slugs (direct or transitive).
     let by_slug: HashMap<&str, &Task> = tasks.iter().map(|t| (t.slug.as_str(), t)).collect();
     let mut result: HashMap<String, Vec<String>> = HashMap::new();
@@ -351,7 +286,7 @@ fn transitive_blockers(
             if !seen.insert(s.to_string()) {
                 continue;
             }
-            if s != t.slug && directly_blocked(root, track, s) {
+            if s != t.slug && directly_blocked(root, s) {
                 blockers.push(s.to_string());
             }
             if let Some(task) = by_slug.get(s) {
@@ -361,7 +296,7 @@ fn transitive_blockers(
             }
         }
         // Also: a task is "blocked" if it's directly blocked itself.
-        if directly_blocked(root, track, &t.slug) {
+        if directly_blocked(root, &t.slug) {
             blockers.insert(0, t.slug.clone());
         }
         result.insert(t.slug.clone(), blockers);
@@ -389,63 +324,44 @@ fn is_runnable(t: &Task, tasks: &[Task], blockers: &HashMap<String, Vec<String>>
 
 // ---- commands ----
 
-/// Single overview command. Replaces the earlier trio of `status`,
-/// `claim-status`, and `resume`: prints the per-track grid (with each
-/// track's next-runnable inline), the active claim, the last few
-/// ticks, and any open questions. Sufficient both as a daily "what's
-/// going on?" check and as a session re-entry view after context
-/// compaction.
+/// Full overview: plan summary, active claim, recent ticks, open
+/// questions. Sufficient both as a daily check and as session re-entry
+/// after Claude Code context compaction.
 fn cmd_status() -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
+    let root = project_root()?;
     println!("Driver status — {}", root.display());
-    if tracks.is_empty() {
-        println!();
-        println!("No tracks. Use /driver:new to create one.");
-        return Ok(());
-    }
+    let plan = read_plan(&root);
 
-    // == tracks ==
-    println!("\n== tracks ==");
-    let id_w = tracks.iter().map(|t| t.id.len()).max().unwrap_or(20);
-    for t in &tracks {
-        if t.done {
-            println!("  done    {:<id_w$}", t.id);
-            continue;
-        }
-        match read_plan(&root, &t.id) {
-            Ok((_, _, tasks)) => {
-                let total = tasks.len();
-                let complete = tasks.iter().filter(|x| x.done).count();
-                let blockers = transitive_blockers(&root, &t.id, &tasks);
-                let runnable: Vec<&Task> = tasks
-                    .iter()
-                    .filter(|x| is_runnable(x, &tasks, &blockers))
-                    .collect();
-                let blocked_count = tasks
-                    .iter()
-                    .filter(|x| !x.done && blockers.get(&x.slug).is_some_and(|b| !b.is_empty()))
-                    .count();
-                let marker = if !runnable.is_empty() {
-                    "open"
-                } else if blocked_count > 0 {
-                    "BLOCK"
-                } else {
-                    "done?"
-                };
-                let next = runnable.first().map(|r| r.slug.clone());
-                let next_str = match next {
-                    Some(s) => format!("next: {s}"),
-                    None if blocked_count > 0 => {
-                        format!("all remaining tasks blocked ({blocked_count})")
-                    }
-                    None => "all tasks done — run `driver close`".to_string(),
-                };
-                println!(
-                    "  {marker:5}   {:<id_w$}  {complete}/{total} done — {next_str}",
-                    t.id
-                );
+    // == plan ==
+    println!("\n== plan ==");
+    match &plan {
+        Ok((_, _, tasks)) => {
+            let total = tasks.len();
+            let complete = tasks.iter().filter(|t| t.done).count();
+            let blockers = transitive_blockers(&root, tasks);
+            let runnable: Vec<&Task> = tasks
+                .iter()
+                .filter(|t| is_runnable(t, tasks, &blockers))
+                .collect();
+            let blocked_count = tasks
+                .iter()
+                .filter(|t| !t.done && blockers.get(&t.slug).is_some_and(|b| !b.is_empty()))
+                .count();
+            println!(
+                "  {complete}/{total} done, {} runnable, {blocked_count} blocked",
+                runnable.len()
+            );
+            if let Some(t) = runnable.first() {
+                let est = t.estimate.map(|e| format!(" (~{e}t)")).unwrap_or_default();
+                println!("  next: {}{est}", t.slug);
+            } else if complete == total && total > 0 {
+                println!("  all tasks done");
+            } else if blocked_count > 0 {
+                println!("  no runnable tasks — see open questions below");
             }
-            Err(e) => println!("  open    {:<id_w$}  (plan error: {e})", t.id),
+        }
+        Err(_) => {
+            println!("  (no plan.md — run /driver:new to scaffold)");
         }
     }
 
@@ -458,8 +374,8 @@ fn cmd_status() -> Result<(), String> {
                 .map(|e| format!(", est ~{e}"))
                 .unwrap_or_default();
             println!(
-                "  {}/{} — turn {}/{} (started {}{est})",
-                c.track, c.slug, c.turn, c.max_turns, c.started_at
+                "  {} — turn {}/{} (started {}{est})",
+                c.slug, c.turn, c.max_turns, c.started_at
             );
         }
         None => println!("  none"),
@@ -479,7 +395,7 @@ fn cmd_status() -> Result<(), String> {
                 (None, Some(e)) => format!("(no claim) / ~{e}t"),
                 (None, None) => "(no claim)".into(),
             };
-            println!("  {} [{}/{}]  {turns}", r.ts, r.track, r.slug);
+            println!("  {} [{}]  {turns}", r.ts, r.slug);
         }
     }
 
@@ -487,13 +403,9 @@ fn cmd_status() -> Result<(), String> {
     println!("\n== open questions ==");
     let mut total_q = 0u32;
     let mut total_unanswered = 0u32;
-    let open_tracks: Vec<&TrackEntry> = tracks.iter().filter(|t| !t.done).collect();
-    for tr in &open_tracks {
-        let Ok((_, _, tasks)) = read_plan(&root, &tr.id) else {
-            continue;
-        };
-        for task in &tasks {
-            let qs = read_questions(&root, &tr.id, &task.slug);
+    if let Ok((_, _, tasks)) = &plan {
+        for task in tasks {
+            let qs = read_questions(&root, &task.slug);
             if qs.is_empty() {
                 continue;
             }
@@ -503,7 +415,7 @@ fn cmd_status() -> Result<(), String> {
             if unanswered_here.is_empty() {
                 continue;
             }
-            println!("  [{}/{}]", tr.id, task.slug);
+            println!("  [{}]", task.slug);
             for q in &unanswered_here {
                 let mut tags: Vec<String> = Vec::new();
                 if let Some(r) = &q.rule {
@@ -530,28 +442,26 @@ fn cmd_status() -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_next(track: Option<String>, json: bool) -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
-    let id = resolve_track(&root, &tracks, track.as_deref())?;
-    let (_, _, tasks) = read_plan(&root, &id)?;
-    let blockers = transitive_blockers(&root, &id, &tasks);
+fn cmd_next(json: bool) -> Result<(), String> {
+    let root = project_root()?;
+    let (_, _, tasks) = read_plan(&root)?;
+    let blockers = transitive_blockers(&root, &tasks);
     let next = tasks
         .iter()
         .find(|t| is_runnable(t, &tasks, &blockers))
-        .ok_or_else(|| format!("track '{id}' has no runnable tasks"))?;
+        .ok_or_else(|| "no runnable tasks".to_string())?;
     if json {
-        print!("{}", task_json(&id, next, false));
+        print!("{}", task_json(next));
     } else {
         print_task(next);
     }
     Ok(())
 }
 
-fn cmd_tasks(track: Option<String>) -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
-    let id = resolve_track(&root, &tracks, track.as_deref())?;
-    let (_, _, tasks) = read_plan(&root, &id)?;
-    let blockers = transitive_blockers(&root, &id, &tasks);
+fn cmd_tasks() -> Result<(), String> {
+    let root = project_root()?;
+    let (_, _, tasks) = read_plan(&root)?;
+    let blockers = transitive_blockers(&root, &tasks);
     for t in &tasks {
         let status = if t.done {
             "done   "
@@ -576,22 +486,22 @@ fn cmd_tasks(track: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let (path, mut lines, tasks) = read_plan(&root, track)?;
+fn cmd_tick(slug: &str, done: bool) -> Result<(), String> {
+    let root = project_root()?;
+    let (path, mut lines, tasks) = read_plan(&root)?;
     let task = tasks
         .iter()
         .find(|t| t.slug == slug)
-        .ok_or_else(|| format!("no task '{slug}' in '{track}'"))?;
+        .ok_or_else(|| format!("no task '{slug}'"))?;
     let estimate = task.estimate;
     // Enforce principles + answered-status when ticking to done.
     if done {
         let active = read_active(&root);
         let start_commit = active
             .as_ref()
-            .filter(|c| c.track == track && c.slug == slug)
+            .filter(|c| c.slug == slug)
             .map(|c| c.start_commit.clone());
-        enforce_tick_gates(&root, track, slug, start_commit.as_deref())?;
+        enforce_tick_gates(&root, slug, start_commit.as_deref())?;
     }
     let line = &mut lines[task.line];
     let (from, to) = if done {
@@ -603,14 +513,8 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
         line.replace_range(i..i + 5, to);
         fs::write(&path, lines.join("\n") + "\n").map_err(|e| format!("write: {e}"))?;
         println!("{slug} → {}", if done { "done" } else { "open" });
-        // Always record history on tick-to-done — this is the only way
-        // `driver stats` ever sees data. When a matching claim is active
-        // we also know actual_turns + budget; without one we still
-        // record the completion (with nulls), and warn so the loss of
-        // turn-count is visible rather than silent.
         if done {
-            let claim = read_active(&root)
-                .filter(|c| c.track == track && c.slug == slug);
+            let claim = read_active(&root).filter(|c| c.slug == slug);
             let actual_turns = claim.as_ref().map(|c| c.turn);
             let budget = claim.as_ref().map(|c| c.max_turns);
             let estimate_at_claim = claim.as_ref().and_then(|c| c.estimate_at_claim);
@@ -618,7 +522,6 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
                 &root,
                 &HistoryRecord {
                     ts: iso_now(),
-                    track: track.to_string(),
                     slug: slug.to_string(),
                     estimate,
                     actual_turns,
@@ -655,17 +558,17 @@ fn cmd_tick(track: &str, slug: &str, done: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_rename(track: &str, old: &str, new: &str) -> Result<(), String> {
+fn cmd_rename(old: &str, new: &str) -> Result<(), String> {
     if old == new {
         return Err("old and new slug are identical".into());
     }
-    let (root, _) = read_tracks()?;
-    let (path, lines, tasks) = read_plan(&root, track)?;
+    let root = project_root()?;
+    let (path, lines, tasks) = read_plan(&root)?;
     if !tasks.iter().any(|t| t.slug == old) {
-        return Err(format!("no task '{old}' in '{track}'"));
+        return Err(format!("no task '{old}'"));
     }
     if tasks.iter().any(|t| t.slug == new) {
-        return Err(format!("task '{new}' already exists in '{track}'"));
+        return Err(format!("task '{new}' already exists"));
     }
     // Rewrite plan.md: replace **old** with **new**, and update [depends:] lists.
     let new_lines: Vec<String> = lines
@@ -676,17 +579,16 @@ fn cmd_rename(track: &str, old: &str, new: &str) -> Result<(), String> {
         })
         .collect();
     fs::write(&path, new_lines.join("\n") + "\n").map_err(|e| format!("write: {e}"))?;
-    // Rename associated files.
-    let track_dir = root.join("tracks").join(track);
+    // Rename associated per-task files.
     for suffix in ["_design.md", "_questions.md"] {
-        let from = track_dir.join(format!("{old}{suffix}"));
+        let from = root.join(format!("{old}{suffix}"));
         if from.exists() {
-            let to = track_dir.join(format!("{new}{suffix}"));
+            let to = root.join(format!("{new}{suffix}"));
             fs::rename(&from, &to).map_err(|e| format!("rename {}: {e}", from.display()))?;
             println!("Renamed {} → {}", from.display(), to.display());
         }
     }
-    println!("Renamed task {old} → {new} in {track}.");
+    println!("Renamed task {old} → {new}.");
     Ok(())
 }
 
@@ -716,50 +618,7 @@ fn rewrite_depends(line: &str, old: &str, new: &str) -> String {
     format!("{}{updated}{}", &line[..i], &line[i + j..])
 }
 
-fn cmd_close(track: &str) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let (_, _, tasks) = read_plan(&root, track)?;
-    let unfinished: Vec<&Task> = tasks.iter().filter(|t| !t.done).collect();
-    if !unfinished.is_empty() {
-        let mut msg = format!("track '{track}' has open tasks:\n");
-        for t in unfinished {
-            msg.push_str(&format!("  - {}\n", t.slug));
-        }
-        return Err(msg.trim_end().to_string());
-    }
-    // Done-ness is derived from plan.md, so there's no registry line
-    // to flip. Closing a track is purely a verification.
-    println!("Closed {track}.");
-    Ok(())
-}
-
 // ---- helpers ----
-
-fn resolve_track(root: &Path, tracks: &[TrackEntry], arg: Option<&str>) -> Result<String, String> {
-    if let Some(id) = arg {
-        if tracks.iter().any(|t| t.id == id) {
-            return Ok(id.to_string());
-        }
-        return Err(format!("no such track: {id}"));
-    }
-    let open: Vec<&TrackEntry> = tracks.iter().filter(|t| !t.done).collect();
-    if open.is_empty() {
-        return Err("no open tracks".into());
-    }
-    if open.len() == 1 {
-        return Ok(open[0].id.clone());
-    }
-    open.iter()
-        .filter_map(|t| {
-            let mtime = fs::metadata(root.join("tracks").join(&t.id).join("plan.md"))
-                .and_then(|m| m.modified())
-                .ok()?;
-            Some((mtime, t.id.clone()))
-        })
-        .max_by_key(|(m, _)| *m)
-        .map(|(_, id)| id)
-        .ok_or_else(|| "could not stat any open track's plan.md".into())
-}
 
 fn print_task(t: &Task) {
     let estimate = t
@@ -799,9 +658,8 @@ fn textwrap_simple(s: &str, w: usize) -> Vec<String> {
     out
 }
 
-fn task_json(track: &str, t: &Task, _verbose: bool) -> String {
+fn task_json(t: &Task) -> String {
     let mut s = String::from("{\n");
-    s.push_str(&format!("  \"track_id\": {},\n", json_str(track)));
     s.push_str(&format!("  \"slug\": {},\n", json_str(&t.slug)));
     if let Some(e) = t.estimate {
         s.push_str(&format!("  \"estimate\": {e},\n"));
@@ -850,7 +708,6 @@ fn json_str(s: &str) -> String {
 
 #[derive(Debug, Clone)]
 struct ActiveClaim {
-    track: String,
     slug: String,
     max_turns: u32,
     turn: u32,
@@ -872,7 +729,6 @@ fn active_path(root: &Path) -> PathBuf {
 fn read_active(root: &Path) -> Option<ActiveClaim> {
     let path = active_path(root);
     let text = fs::read_to_string(&path).ok()?;
-    let mut track = String::new();
     let mut slug = String::new();
     let mut max_turns: u32 = 50;
     let mut turn: u32 = 0;
@@ -884,21 +740,20 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
             continue;
         };
         match k.trim() {
-            "track" => track = v.trim().to_string(),
             "slug" => slug = v.trim().to_string(),
             "max_turns" => max_turns = v.trim().parse().unwrap_or(50),
             "turn" => turn = v.trim().parse().unwrap_or(0),
             "started_at" => started_at = v.trim().to_string(),
             "start_commit" => start_commit = v.trim().to_string(),
             "estimate_at_claim" => estimate_at_claim = v.trim().parse().ok(),
+            // Legacy `track=` field from pre-flat data is silently ignored.
             _ => {}
         }
     }
-    if track.is_empty() || slug.is_empty() {
+    if slug.is_empty() {
         return None;
     }
     Some(ActiveClaim {
-        track,
         slug,
         max_turns,
         turn,
@@ -915,8 +770,7 @@ fn write_active(root: &Path, claim: &ActiveClaim) -> Result<(), String> {
         .map(|e| e.to_string())
         .unwrap_or_default();
     let body = format!(
-        "track={}\nslug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\nestimate_at_claim={}\n",
-        claim.track,
+        "slug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\nestimate_at_claim={}\n",
         claim.slug,
         claim.max_turns,
         claim.turn,
@@ -971,26 +825,25 @@ fn days_to_ymd(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-fn cmd_claim(track: &str, slug: &str, max_turns: u32) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let (_, _, tasks) = read_plan(&root, track)?;
+fn cmd_claim(slug: &str, max_turns: u32) -> Result<(), String> {
+    let root = project_root()?;
+    let (_, _, tasks) = read_plan(&root)?;
     let task = tasks
         .iter()
         .find(|t| t.slug == slug)
-        .ok_or_else(|| format!("no task '{slug}' in '{track}'"))?;
+        .ok_or_else(|| format!("no task '{slug}'"))?;
     if task.done {
         return Err(format!("task '{slug}' is already done"));
     }
     if let Some(existing) = read_active(&root) {
         return Err(format!(
-            "claim already active for {}/{} (turn {}/{}). Release first with `driver release` if you want to switch.",
-            existing.track, existing.slug, existing.turn, existing.max_turns
+            "claim already active for {} (turn {}/{}). Release first with `driver release` if you want to switch.",
+            existing.slug, existing.turn, existing.max_turns
         ));
     }
     let start_commit = git_head_commit(&root).unwrap_or_default();
     let estimate_at_claim = task.estimate;
     let claim = ActiveClaim {
-        track: track.to_string(),
         slug: slug.to_string(),
         max_turns,
         turn: 0,
@@ -999,10 +852,7 @@ fn cmd_claim(track: &str, slug: &str, max_turns: u32) -> Result<(), String> {
         estimate_at_claim,
     };
     write_active(&root, &claim)?;
-    println!(
-        "Claimed {}/{} for up to {max_turns} turns.",
-        claim.track, claim.slug
-    );
+    println!("Claimed {} for up to {max_turns} turns.", claim.slug);
     if let Some(e) = estimate_at_claim {
         if max_turns > (e as f64 * 1.5) as u32 {
             println!(
@@ -1022,7 +872,7 @@ fn cmd_release() -> Result<(), String> {
     let prev = read_active(&root);
     delete_active(&root);
     match prev {
-        Some(c) => println!("Released {}/{}.", c.track, c.slug),
+        Some(c) => println!("Released {}.", c.slug),
         None => println!("No active claim."),
     }
     Ok(())
@@ -1044,7 +894,7 @@ fn cmd_gate() -> ExitCode {
     claim.turn += 1;
 
     // Check whether the task is now done.
-    if let Ok((_, _, tasks)) = read_plan(&root, &claim.track) {
+    if let Ok((_, _, tasks)) = read_plan(&root) {
         if let Some(task) = tasks.iter().find(|t| t.slug == claim.slug) {
             if task.done {
                 delete_active(&root);
@@ -1058,7 +908,7 @@ fn cmd_gate() -> ExitCode {
     }
 
     // Check whether the task is halted by an unanswered halt-question.
-    if directly_blocked(&root, &claim.track, &claim.slug) {
+    if directly_blocked(&root, &claim.slug) {
         delete_active(&root);
         return ExitCode::SUCCESS;
     }
@@ -1067,8 +917,8 @@ fn cmd_gate() -> ExitCode {
     if claim.turn > claim.max_turns {
         delete_active(&root);
         eprintln!(
-            "driver gate: turn budget exceeded for {}/{} ({}/{}). Released claim — agent may stop.",
-            claim.track, claim.slug, claim.turn, claim.max_turns
+            "driver gate: turn budget exceeded for {} ({}/{}). Released claim — agent may stop.",
+            claim.slug, claim.turn, claim.max_turns
         );
         return ExitCode::SUCCESS;
     }
@@ -1090,9 +940,8 @@ fn cmd_gate() -> ExitCode {
         ""
     };
     eprintln!(
-        "[driver] turn {turn}/{max} — {track}/{slug}{warn}. Tick when done or `driver block {track} {slug} \"<question>\"`.",
+        "[driver] turn {turn}/{max} — {slug}{warn}. Tick when done or `driver ask {slug} --halt \"<question>\"`.",
         slug = claim.slug,
-        track = claim.track,
         turn = claim.turn,
         max = claim.max_turns,
     );
@@ -1103,7 +952,6 @@ fn cmd_gate() -> ExitCode {
 
 struct HistoryRecord {
     ts: String,
-    track: String,
     slug: String,
     /// Plan estimate at tick time. Captured by re-reading plan.md;
     /// reflects whatever value plan.md holds when tick runs.
@@ -1133,9 +981,8 @@ fn append_history(root: &Path, rec: &HistoryRecord) {
         v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
     };
     let line = format!(
-        "{{\"ts\": {}, \"track\": {}, \"slug\": {}, \"estimate\": {}, \"actual_turns\": {}, \"budget\": {}, \"estimate_at_claim\": {}, \"status\": {}}}\n",
+        "{{\"ts\": {}, \"slug\": {}, \"estimate\": {}, \"actual_turns\": {}, \"budget\": {}, \"estimate_at_claim\": {}, \"status\": {}}}\n",
         json_str(&rec.ts),
-        json_str(&rec.track),
         json_str(&rec.slug),
         opt_num(rec.estimate),
         opt_num(rec.actual_turns),
@@ -1165,7 +1012,6 @@ fn read_history(root: &Path) -> Vec<HistoryRecord> {
         // Minimal JSON parse: pull the fields we wrote. Robust enough
         // for our own append-only format.
         let ts = json_field(line, "ts").unwrap_or_default();
-        let track = json_field(line, "track").unwrap_or_default();
         let slug = json_field(line, "slug").unwrap_or_default();
         let estimate = json_number(line, "estimate");
         let actual_turns = json_number(line, "actual_turns");
@@ -1176,9 +1022,9 @@ fn read_history(root: &Path) -> Vec<HistoryRecord> {
             "blocked" => "blocked",
             _ => "done",
         };
+        // Legacy records carried a `track` field; it's read and ignored.
         out.push(HistoryRecord {
             ts,
-            track,
             slug,
             estimate,
             actual_turns,
@@ -1210,20 +1056,15 @@ fn json_number(line: &str, key: &str) -> Option<u32> {
     rest[..end].trim().parse().ok()
 }
 
-fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
+fn cmd_stats() -> Result<(), String> {
     let root = find_driver_root()?;
     let records = read_history(&root);
     let mut records: Vec<&HistoryRecord> = records
         .iter()
         .filter(|r| r.status == "done")
-        .filter(|r| track_filter.map(|t| t == r.track).unwrap_or(true))
         .collect();
     if records.is_empty() {
-        if let Some(t) = track_filter {
-            println!("No history for track '{t}'.");
-        } else {
-            println!("No history yet. Tick a task to populate .history.jsonl.");
-        }
+        println!("No history yet. Tick a task to populate .history.jsonl.");
         return Ok(());
     }
     records.sort_by_key(|r| r.ts.clone());
@@ -1235,10 +1076,7 @@ fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
         .filter_map(|r| r.actual_turns.map(|a| (*r, a)))
         .collect();
 
-    println!(
-        "Driver stats — {n} completed task(s){}",
-        track_filter.map(|t| format!(" in {t}")).unwrap_or_default()
-    );
+    println!("Driver stats — {n} completed task(s)");
     if n_no_actual > 0 {
         println!(
             "  ({n_no_actual} ticked without a claim — actual_turns not captured)"
@@ -1293,9 +1131,8 @@ fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
                 println!("\nLargest under-estimates (actual ≫ est):");
                 for (r, a, e, ratio) in under {
                     println!(
-                        "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                        "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×)",
                         slug = r.slug,
-                        track = r.track,
                     );
                 }
             }
@@ -1303,9 +1140,8 @@ fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
                 println!("\nLargest over-estimates (actual ≪ est):");
                 for (r, a, e, ratio) in over {
                     println!(
-                        "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×) [{track}]",
+                        "  {slug:<28} ~{e}t est, {a}t actual ({ratio:.2}×)",
                         slug = r.slug,
-                        track = r.track,
                     );
                 }
             }
@@ -1333,9 +1169,8 @@ fn cmd_stats(track_filter: Option<&str>) -> Result<(), String> {
             println!("\nScope-growth (budget or actual ≥ 1.5× plan estimate at claim):");
             for (r, a, b, e0) in &grew {
                 println!(
-                    "  {slug:<28} ~{e0}t planned → {b}t budgeted, {a}t actual [{track}]",
+                    "  {slug:<28} ~{e0}t planned → {b}t budgeted, {a}t actual",
                     slug = r.slug,
-                    track = r.track,
                 );
             }
         }
@@ -1374,7 +1209,7 @@ fn cmd_doctor() -> Result<(), String> {
                 report(
                     true,
                     "Active claim",
-                    &format!("{}/{} — turn {}/{}", c.track, c.slug, c.turn, c.max_turns),
+                    &format!("{} — turn {}/{}", c.slug, c.turn, c.max_turns),
                 );
             } else {
                 report(true, "Active claim", "(none)");
@@ -1599,8 +1434,8 @@ fn git_touched_files(root: &Path, since_commit: &str) -> Vec<String> {
         .collect()
 }
 
-fn questions_path(root: &Path, track: &str, slug: &str) -> PathBuf {
-    root.join("tracks").join(track).join(format!("{slug}_questions.md"))
+fn questions_path(root: &Path, slug: &str) -> PathBuf {
+    root.join(format!("{slug}_questions.md"))
 }
 
 #[derive(Debug, Clone)]
@@ -1618,8 +1453,8 @@ struct Question {
     halt: bool,
 }
 
-fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
-    let path = questions_path(root, track, slug);
+fn read_questions(root: &Path, slug: &str) -> Vec<Question> {
+    let path = questions_path(root, slug);
     let Ok(text) = fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -1694,17 +1529,16 @@ fn read_questions(root: &Path, track: &str, slug: &str) -> Vec<Question> {
 }
 
 fn cmd_ask(
-    track: &str,
     slug: &str,
     question: &str,
     rule: Option<&str>,
     context: Option<&str>,
     halt: bool,
 ) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let (_, _, tasks) = read_plan(&root, track)?;
+    let root = project_root()?;
+    let (_, _, tasks) = read_plan(&root)?;
     if !tasks.iter().any(|t| t.slug == slug) {
-        return Err(format!("no task '{slug}' in '{track}'"));
+        return Err(format!("no task '{slug}'"));
     }
     // Validate the rule name if given.
     if let Some(r) = rule {
@@ -1717,9 +1551,9 @@ fn cmd_ask(
             ));
         }
     }
-    let existing = read_questions(&root, track, slug);
+    let existing = read_questions(&root, slug);
     let next_idx = existing.iter().map(|q| q.index).max().unwrap_or(0) + 1;
-    let path = questions_path(&root, track, slug);
+    let path = questions_path(&root, slug);
     let mut body = if path.exists() {
         fs::read_to_string(&path).unwrap_or_default()
     } else {
@@ -1754,15 +1588,12 @@ fn cmd_ask(
     } else {
         format!(" [{}]", tags.join(", "))
     };
-    println!(
-        "Q{next_idx} logged for {track}/{slug}{tag_str} → {}",
-        path.display()
-    );
+    println!("Q{next_idx} logged for {slug}{tag_str} → {}", path.display());
     if halt {
         // If this halt-question belongs to the actively-claimed task,
         // release the claim — the agent has signalled "stuck."
         if let Some(claim) = read_active(&root) {
-            if claim.track == track && claim.slug == slug {
+            if claim.slug == slug {
                 delete_active(&root);
                 println!("  claim released (halt question logged).");
             }
@@ -1776,11 +1607,11 @@ fn cmd_ask(
 /// section, and replaces its `**answer:** ...` line (or the first
 /// `**answer:**` line within that section). Idempotent — running
 /// twice replaces the prior answer.
-fn cmd_answer(track: &str, slug: &str, index: u32, answer: &str) -> Result<(), String> {
-    let (root, _) = read_tracks()?;
-    let path = questions_path(&root, track, slug);
+fn cmd_answer(slug: &str, index: u32, answer: &str) -> Result<(), String> {
+    let root = project_root()?;
+    let path = questions_path(&root, slug);
     if !path.exists() {
-        return Err(format!("no questions file for {track}/{slug}"));
+        return Err(format!("no questions file for {slug}"));
     }
     let text = fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
     let header_prefix = format!("## Q{index}");
@@ -1815,62 +1646,49 @@ fn cmd_answer(track: &str, slug: &str, index: u32, answer: &str) -> Result<(), S
         new_text.push('\n');
     }
     fs::write(&path, new_text).map_err(|e| format!("write: {e}"))?;
-    println!("Q{index} answered for {track}/{slug}.");
+    println!("Q{index} answered for {slug}.");
     Ok(())
 }
 
-fn cmd_questions(track_filter: Option<&str>) -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
-    let target_tracks: Vec<String> = match track_filter {
-        Some(t) => {
-            if !tracks.iter().any(|x| x.id == t) {
-                return Err(format!("no such track: {t}"));
-            }
-            vec![t.to_string()]
-        }
-        None => tracks.iter().filter(|x| !x.done).map(|x| x.id.clone()).collect(),
-    };
+fn cmd_questions() -> Result<(), String> {
+    let root = project_root()?;
+    let (_, _, tasks) = read_plan(&root)?;
     let mut total = 0u32;
     let mut total_unanswered = 0u32;
-    for track_id in &target_tracks {
-        let Ok((_, _, tasks)) = read_plan(&root, track_id) else {
+    for task in &tasks {
+        let qs = read_questions(&root, &task.slug);
+        if qs.is_empty() {
             continue;
-        };
-        for task in &tasks {
-            let qs = read_questions(&root, track_id, &task.slug);
-            if qs.is_empty() {
-                continue;
+        }
+        println!("[{}]", task.slug);
+        for q in &qs {
+            total += 1;
+            let mark = if q.answered {
+                "✓"
+            } else if q.halt {
+                "✗"
+            } else {
+                "·"
+            };
+            if !q.answered {
+                total_unanswered += 1;
             }
-            println!("[{track_id}/{}]", task.slug);
-            for q in &qs {
-                total += 1;
-                let mark = if q.answered {
-                    "✓"
-                } else if q.halt {
-                    "✗"
-                } else {
-                    "·"
-                };
-                if !q.answered {
-                    total_unanswered += 1;
-                }
-                let mut tags: Vec<String> = Vec::new();
-                if let Some(r) = &q.rule {
-                    tags.push(r.clone());
-                }
-                if q.halt {
-                    tags.push("halt".into());
-                }
-                let tag_str = if tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", tags.join(", "))
-                };
-                println!("  {mark} Q{}{tag_str}: {}", q.index, q.summary);
-                if !q.context.is_empty() {
-                    for line in textwrap_simple(&q.context, 72) {
-                        println!("      {line}");
-                    }
+            let mut tags: Vec<String> = Vec::new();
+            if let Some(r) = &q.rule {
+                tags.push(r.clone());
+            }
+            if q.halt {
+                tags.push("halt".into());
+            }
+            let tag_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", tags.join(", "))
+            };
+            println!("  {mark} Q{}{tag_str}: {}", q.index, q.summary);
+            if !q.context.is_empty() {
+                for line in textwrap_simple(&q.context, 72) {
+                    println!("      {line}");
                 }
             }
         }
@@ -1878,9 +1696,7 @@ fn cmd_questions(track_filter: Option<&str>) -> Result<(), String> {
     if total == 0 {
         println!("No open questions.");
     } else {
-        println!(
-            "\n{total} question(s) total, {total_unanswered} unanswered."
-        );
+        println!("\n{total} question(s) total, {total_unanswered} unanswered.");
     }
     Ok(())
 }
@@ -1889,14 +1705,13 @@ fn cmd_questions(track_filter: Option<&str>) -> Result<(), String> {
 /// about to be ticked. Returns Err with a diagnostic if anything fails.
 fn enforce_tick_gates(
     root: &Path,
-    track: &str,
     slug: &str,
     start_commit: Option<&str>,
 ) -> Result<(), String> {
     // Floor: triggered files touched since claim start must have a
     // matching rule-tagged question.
     let rules = read_principles(root);
-    let questions = read_questions(root, track, slug);
+    let questions = read_questions(root, slug);
     if !rules.is_empty() {
         if let Some(commit) = start_commit.filter(|s| !s.is_empty()) {
             let touched = git_touched_files(root, commit);
@@ -1913,7 +1728,7 @@ fn enforce_tick_gates(
                     .any(|q| q.rule.as_deref() == Some(rule.name.as_str()));
                 if !has_q {
                     return Err(format!(
-                        "principles rule '{}' tripped — touched: {}\n  → run `driver ask {track} {slug} --rule {} \"<question>\" --context \"...\"` first, or revert the change.",
+                        "principles rule '{}' tripped — touched: {}\n  → run `driver ask {slug} --rule {} \"<question>\" --context \"...\"` first, or revert the change.",
                         rule.name,
                         tripped.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
                         rule.name,

@@ -1,6 +1,6 @@
-Run all runnable tasks of a Driver track end-to-end, autonomously. Loop: claim → implement → tick (or stage as "answered later") → check `driver next` → repeat. Goal is "do everything Driver can do without input from me, then batch all required questions for one review."
+Run all runnable tasks end-to-end, autonomously. Loop: claim → implement → tick (or stage as "answered later") → check `driver next` → repeat. Goal is "do everything Driver can do without input from me, then batch all required questions for one review."
 
-This is for "run this whole track while I'm away" mode.
+This is for "burn down the plan while I'm away" mode.
 
 ## Prerequisite check
 
@@ -8,20 +8,16 @@ Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items
 
 ## Session re-entry
 
-Run `driver status` once at the top. It prints the per-track grid, active claim, recent ticks, and open questions. If there's an active claim or unanswered questions left over from a prior (possibly compacted) session, address those before claiming anything new.
+Run `driver status` once at the top. It prints the plan summary, active claim, recent ticks, and open questions. If there's an active claim or unanswered questions left over from a prior (possibly compacted) session, address those before claiming anything new.
 
 If `driver/principles.md` exists, read it once to know which file changes will trigger the floor.
-
-## Inputs
-
-Optional positional argument: `<track_id>`. If omitted, picks the most recently modified open track.
 
 ## Loop
 
 Repeat until no further progress is possible:
 
-1. Run `driver next [<track_id>] --json`.
-   - If "no runnable tasks": the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things. If anything is unanswered, jump to the **Final report** below. Otherwise the track is complete: `driver close <track_id>` and final report.
+1. Run `driver next --json`.
+   - If "no runnable tasks": the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things. If anything is unanswered, jump to the **Final report** below. Otherwise the plan is complete — final report.
 
 2. Follow `/driver:do`'s steps for that one task (design doc if needed, claim, implement, test, commit, tick).
 
@@ -29,7 +25,7 @@ Repeat until no further progress is possible:
 
 4. **If `driver tick` refuses with "principles rule tripped":** run the suggested `driver ask --rule <name>` command. Then either keep working on parts of the task that don't depend on the answer, or — if blocked on the answer — release the claim and loop.
 
-5. **If a task is fully stuck** (not just an open question — you genuinely can't make further progress): `driver ask --halt <track> <slug> "<question>"`. That logs the question with a halt marker, releases the active claim, and makes dependents transitively unreachable until the question is answered. Loop on.
+5. **If a task is fully stuck** (not just an open question — you genuinely can't make further progress): `driver ask <slug> --halt "<question>"`. That logs the question with a halt marker, releases the active claim, and makes dependents transitively unreachable until the question is answered. Loop on.
 
 6. **If two consecutive tasks fail tests:** stop the loop and final-report. Something structural is wrong.
 
@@ -49,12 +45,12 @@ When the loop exits with open questions still staged, **don't print-and-stop.** 
    - State the question (one or two sentences).
    - State the trade-off, alternatives considered, and your recommendation.
    - Pause. The user may discuss, push back, or want more detail. Respond conversationally.
-   - When the user decides, record via `driver answer <track> <slug> <Q#> "<decision>"`.
+   - When the user decides, record via `driver answer <slug> <Q#> "<decision>"`.
    - Move to the next question.
 
 3. Once all questions are answered (or the user wants to leave some for later), offer to resume: "All answered — want me to continue running `/driver:go` from where we left off?" If yes, restart the loop from step 1 of the outer Loop.
 
-Order the questions by importance: mechanical-floor (rule-tagged) questions first, since they tend to be more foundational than self-classified ones. Within each group, walk in track-then-Q-number order.
+Order the questions by importance: mechanical-floor (rule-tagged) questions first, since they tend to be more foundational than self-classified ones. Within each group, walk in Q-number order.
 
 If the user wants to skip a question ("come back to that later"), respect it. That task stays staged; the others can still resume.
 
@@ -63,20 +59,18 @@ If the user wants to skip a question ("come back to that later"), respect it. Th
 After the conversation phase, if everything resolved and the loop ran to true completion:
 
 ```
-/driver:go done — <track_id>
+/driver:go done
 
 Completed:   N tasks (~total turns spent)
   - <slug>   <commit>   (<actual>/<budget> turns)
 
 Questions answered:  Q (all resolved during this run)
-
-Track closed.
 ```
 
 If there are still unanswered questions or blocks at the end:
 
 ```
-/driver:go paused — <track_id>
+/driver:go paused
 
 Completed:   N tasks
 Staged (still open):
@@ -85,4 +79,4 @@ Staged (still open):
 Re-run /driver:go when you want to walk through the remaining questions.
 ```
 
-**Do not modify tracks other than the named one. Do not skip tests. Do not tick a task whose tests don't pass. Do not invent answers to your own questions.**
+**Do not skip tests. Do not tick a task whose tests don't pass. Do not invent answers to your own questions.**
