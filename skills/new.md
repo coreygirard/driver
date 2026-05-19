@@ -1,6 +1,10 @@
 Scaffold a new Driver project (or add the first tasks if one already exists). Creates `driver/plan.md` and commits, then stops. Do NOT implement any task — that's what `/driver:do` / `/driver:go` are for.
 
-## Inputs (ask via `AskUserQuestion`, one prompt)
+## Inputs — you MUST ask the user via `AskUserQuestion`
+
+This skill captures the user's planning intent. **Always ask via `AskUserQuestion` before scaffolding** — do not auto-propose a title or task list from prior conversation context, even when the user has set an autonomous / no-clarifying-questions flag for the session. That flag exists to prevent pauses mid-implementation; choosing *what to plan next* is the exact decision this skill exists to capture, so it overrides the flag here. If you have suggestions, surface them as the options in the `AskUserQuestion` call, not as a pre-baked commit.
+
+Ask in one prompt:
 
 - **One-line title** (~100 chars). Becomes the `# Heading` of `plan.md`.
 - **Task outline**: a comma-separated list of task slugs (e.g. `imperatives, possessives, attributive-adjectives, verify`). Optional — if empty, emit a single `placeholder-task`.
