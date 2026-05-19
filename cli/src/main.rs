@@ -31,16 +31,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// List all currently-runnable tasks of a track.
-    Runnable {
-        track: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     /// List all tasks in a track with their status.
     Tasks { track: Option<String> },
-    /// List blocked tasks of a track.
-    Blocked { track: Option<String> },
     /// Tick a task as done.
     Tick { track: String, slug: String },
     /// Untick a task (mark open again).
@@ -116,9 +108,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Cmd::Status => cmd_status(),
         Cmd::Next { track, json } => cmd_next(track, json),
-        Cmd::Runnable { track, json } => cmd_runnable(track, json),
         Cmd::Tasks { track } => cmd_tasks(track),
-        Cmd::Blocked { track } => cmd_blocked(track),
         Cmd::Tick { track, slug } => cmd_tick(&track, &slug, true),
         Cmd::Untick { track, slug } => cmd_tick(&track, &slug, false),
         Cmd::Rename {
@@ -557,33 +547,6 @@ fn cmd_next(track: Option<String>, json: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_runnable(track: Option<String>, json: bool) -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
-    let id = resolve_track(&root, &tracks, track.as_deref())?;
-    let (_, _, tasks) = read_plan(&root, &id)?;
-    let blockers = transitive_blockers(&root, &id, &tasks);
-    let runnable: Vec<&Task> = tasks
-        .iter()
-        .filter(|t| is_runnable(t, &tasks, &blockers))
-        .collect();
-    if json {
-        print!("{{\"track_id\": {}, \"runnable\": [\n", json_str(&id));
-        for (i, t) in runnable.iter().enumerate() {
-            let sep = if i + 1 == runnable.len() { "" } else { "," };
-            print!("  {}{sep}\n", task_json_compact(t));
-        }
-        print!("]}}\n");
-    } else {
-        if runnable.is_empty() {
-            println!("No runnable tasks in '{id}'.");
-        }
-        for t in &runnable {
-            print_task(t);
-        }
-    }
-    Ok(())
-}
-
 fn cmd_tasks(track: Option<String>) -> Result<(), String> {
     let (root, tracks) = read_tracks()?;
     let id = resolve_track(&root, &tracks, track.as_deref())?;
@@ -609,32 +572,6 @@ fn cmd_tasks(track: Option<String>) -> Result<(), String> {
             format!(" [depends: {}]", t.depends.join(", "))
         };
         println!("{status}  {}{estimate}{deps}", t.slug);
-    }
-    Ok(())
-}
-
-fn cmd_blocked(track: Option<String>) -> Result<(), String> {
-    let (root, tracks) = read_tracks()?;
-    let id = resolve_track(&root, &tracks, track.as_deref())?;
-    let (_, _, tasks) = read_plan(&root, &id)?;
-    let mut any = false;
-    for t in &tasks {
-        let halts: Vec<Question> = read_questions(&root, &id, &t.slug)
-            .into_iter()
-            .filter(|q| q.halt && !q.answered)
-            .collect();
-        for q in &halts {
-            any = true;
-            let rule = q
-                .rule
-                .as_deref()
-                .map(|r| format!(" ({r})"))
-                .unwrap_or_default();
-            println!("[{}] Q{}{rule}: {}", t.slug, q.index, q.summary);
-        }
-    }
-    if !any {
-        println!("No blocked tasks in '{id}'.");
     }
     Ok(())
 }
@@ -882,22 +819,6 @@ fn task_json(track: &str, t: &Task, _verbose: bool) -> String {
     ));
     s.push_str("}\n");
     s
-}
-
-fn task_json_compact(t: &Task) -> String {
-    format!(
-        "{{\"slug\": {}, \"estimate\": {}, \"depends\": [{}], \"description\": {}}}",
-        json_str(&t.slug),
-        t.estimate
-            .map(|e| e.to_string())
-            .unwrap_or("null".into()),
-        t.depends
-            .iter()
-            .map(|d| json_str(d))
-            .collect::<Vec<_>>()
-            .join(", "),
-        json_str(&t.description)
-    )
 }
 
 fn json_str(s: &str) -> String {

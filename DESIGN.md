@@ -230,8 +230,8 @@ the task is done" — without depending on `/goal`. Skills like
 `/driver:do` can now run a task end-to-end in one command, with no
 paste step. The gate is deterministic (file-state check, no LLM
 evaluator), simpler than `/goal`'s Haiku-judging condition, and the
-escalation channel (`driver ask --halt`) is the same one `/driver:next`
-and the rest of Driver use.
+escalation channel (`driver ask --halt`) is the same one the rest of
+Driver uses.
 
 Don't combine with `/goal` in the same session: both set Stop hooks
 and the interaction is undefined. Pick one per session.

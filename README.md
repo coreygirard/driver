@@ -10,8 +10,8 @@ Driver is two pieces:
   plans, ticking tasks, listing the next runnable task, gating Stop
   hooks, closing tracks.
 - **`skills/`** — Claude Code slash commands (`/driver:new`,
-  `/driver:status`, `/driver:next`, `/driver:close`, `/driver:do`,
-  `/driver:go`) that wrap the CLI for interactive use.
+  `/driver:status`, `/driver:close`, `/driver:do`, `/driver:go`)
+  that wrap the CLI for interactive use.
 
 Either piece can be used without the other.
 
@@ -95,9 +95,7 @@ question, or budget exhausted.
 ```
 driver status                                full overview: tracks, claim, recent ticks, open questions
 driver next [<track>] [--json]               next runnable task
-driver runnable [<track>] [--json]           all currently-runnable tasks
-driver tasks [<track>]                       list tasks with status
-driver blocked [<track>]                     list blocked tasks + questions
+driver tasks [<track>]                       list tasks with status (done/blocked/runable/waiting)
 driver tick <track> <slug>                   mark task done
 driver untick <track> <slug>                 mark task open again
 driver rename <track> <old-slug> <new-slug>  rename a task (updates deps)
@@ -134,8 +132,7 @@ Run from anywhere inside a project — `driver` walks up looking for a
 | Slash command | What it does |
 |---|---|
 | `/driver:new` | Asks for slug + summary + task outline; scaffolds `tracks/<id>/plan.md`; commits |
-| `/driver:status` | Lists tracks (derived from the filesystem) and the next runnable task per track |
-| `/driver:next` | Drafts a `/goal` for the next runnable task (paste-then-fire mode) |
+| `/driver:status` | Wrapper around `driver status` |
 | `/driver:do` | Runs the next runnable task end-to-end (Stop-hook safety net) |
 | `/driver:go` | Runs *all* runnable tasks until the track is done or halted |
 | `/driver:close` | Verifies a track when all its tasks are ticked |

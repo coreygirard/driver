@@ -16,7 +16,7 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
 
 ## Steps
 
-1. Run `driver next [<track_id>] --json`. Capture `track_id`, `slug`, `estimate`, `depends`, `description`. If the CLI reports "no runnable tasks", run `driver questions` + `driver blocked` and report open items to the user; stop.
+1. Run `driver next [<track_id>] --json`. Capture `track_id`, `slug`, `estimate`, `depends`, `description`. If the CLI reports "no runnable tasks", the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things — surface those open items to the user and stop.
 
 2. Check whether `driver/tracks/<track_id>/<slug>_design.md` exists. If it doesn't AND the description contains any of: "schema", "CoreIr", "Predicate", "Entity", "design pass first", or any other strong signal that the task needs upfront design — write the design doc as the first step. Commit it as one commit before proceeding with implementation.
 

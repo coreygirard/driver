@@ -21,7 +21,7 @@ Optional positional argument: `<track_id>`. If omitted, picks the most recently 
 Repeat until no further progress is possible:
 
 1. Run `driver next [<track_id>] --json`.
-   - If "no runnable tasks": check `driver questions [<track_id>]` and `driver blocked [<track_id>]`. If there are unanswered questions or blocks, jump to the **Final report** below. Otherwise the track is complete: `driver close <track_id>` and final report.
+   - If "no runnable tasks": the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things. If anything is unanswered, jump to the **Final report** below. Otherwise the track is complete: `driver close <track_id>` and final report.
 
 2. Follow `/driver:do`'s steps for that one task (design doc if needed, claim, implement, test, commit, tick).
 
