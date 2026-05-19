@@ -1219,7 +1219,8 @@ fn cmd_doctor() -> Result<(), String> {
     all_ok &= on_path;
 
     // 2. Stop hook installed in ~/.claude/settings.json?
-    let (hook_ok, hook_detail) = check_stop_hook(&bin);
+    let settings_text = read_settings();
+    let (hook_ok, hook_detail) = check_stop_hook(&bin, settings_text.as_deref());
     report(hook_ok, "Stop hook installed", &hook_detail);
     all_ok &= hook_ok;
     if !hook_ok {
@@ -1231,6 +1232,41 @@ fn cmd_doctor() -> Result<(), String> {
         }
         println!();
         println!("  Merge into an existing `hooks` section if you have one.");
+    } else {
+        // 2b. Actually invoke the hook's command to verify it works.
+        // Text-matching `driver gate` in settings.json doesn't catch a
+        // stale binary path, missing executable bit, or a hook pointing
+        // at a different driver build that errors out. Run the command
+        // from a no-project cwd (so gate finds no .active and exits 0)
+        // and check the exit code.
+        let cmd = settings_text
+            .as_deref()
+            .and_then(extract_hook_command);
+        match cmd {
+            Some(c) => match invoke_hook_command(&c) {
+                Ok(0) => report(true, "Stop hook runs", &format!("`{c}` exit 0")),
+                Ok(n) => {
+                    report(
+                        false,
+                        "Stop hook runs",
+                        &format!("`{c}` exited {n} (expected 0 from a no-claim state)"),
+                    );
+                    all_ok = false;
+                }
+                Err(e) => {
+                    report(false, "Stop hook runs", &format!("`{c}` failed to run: {e}"));
+                    all_ok = false;
+                }
+            },
+            None => {
+                report(
+                    false,
+                    "Stop hook runs",
+                    "couldn't extract `command` field from settings.json",
+                );
+                all_ok = false;
+            }
+        }
     }
 
     // 3. cwd inside a driver project? Informational — doctor passes
@@ -1274,17 +1310,68 @@ fn which_on_path(name: &str) -> Option<String> {
     None
 }
 
-fn check_stop_hook(bin: &str) -> (bool, String) {
-    let Some(home) = std::env::var_os("HOME") else {
-        return (false, "$HOME not set".into());
-    };
+/// Read the user's Claude Code settings.json, if it exists.
+fn read_settings() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
     let path = PathBuf::from(home).join(".claude").join("settings.json");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return (
-            false,
-            format!("{} not found", path.display()),
-        );
+    fs::read_to_string(&path).ok()
+}
+
+fn settings_path() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".claude").join("settings.json")
+}
+
+/// Pull out the `"command"` value of the Stop hook entry, if present.
+/// Naive scan: finds any `"command": "..."` whose value ends with
+/// ` gate`. Good enough for our own snippet shape; doesn't try to
+/// understand the full JSON structure.
+fn extract_hook_command(settings: &str) -> Option<String> {
+    let needle = "\"command\":";
+    let mut pos = 0usize;
+    while let Some(rel) = settings[pos..].find(needle) {
+        let after = pos + rel + needle.len();
+        let rest = settings[after..].trim_start();
+        let bytes_skipped = settings[after..].len() - rest.len();
+        if !rest.starts_with('"') {
+            pos = after + bytes_skipped + 1;
+            continue;
+        }
+        let val_start = after + bytes_skipped + 1;
+        // Find closing quote. (No escape handling — our snippet
+        // doesn't contain quotes inside the command string.)
+        if let Some(end_rel) = settings[val_start..].find('"') {
+            let val = &settings[val_start..val_start + end_rel];
+            if val.ends_with(" gate") {
+                return Some(val.to_string());
+            }
+            pos = val_start + end_rel + 1;
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// Invoke the hook's command from a neutral cwd (the system temp dir,
+/// where `gate` will find no driver project and exit 0). Returns the
+/// exit code, or an Err describing why the process couldn't be spawned.
+fn invoke_hook_command(command: &str) -> Result<i32, String> {
+    let temp = std::env::temp_dir();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(&temp)
+        .output()
+        .map_err(|e| format!("spawn: {e}"))?;
+    Ok(output.status.code().unwrap_or(-1))
+}
+
+fn check_stop_hook(bin: &str, settings: Option<&str>) -> (bool, String) {
+    let Some(text) = settings else {
+        return (false, format!("{} not found", settings_path().display()));
     };
+    let path = settings_path();
     // Naive check: does the file mention `<bin> gate` or any `driver gate` command in a Stop hook context?
     let needles = [format!("{bin} gate"), "driver gate".to_string()];
     let mentions_bin = needles.iter().any(|n| text.contains(n.as_str()));
