@@ -12,7 +12,9 @@ If `driver/principles.md` exists, read it once at the top to understand which fi
 
 ## Steps
 
-1. Run `driver next --json`. Capture `slug`, `estimate`, `depends`, `description`. If the CLI reports "no runnable tasks", the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things — surface those open items to the user and stop.
+1. Run `driver next --json`. Capture `slug`, `estimate`, `depends`, `description`, and **`spec`**. If the CLI reports "no runnable tasks", the `== open questions ==` section of `driver status` (already printed above) shows what's blocking things — surface those open items to the user and stop.
+
+   **Read the `spec` field.** It is a JSON array of `{hash, name, body}` objects describing the spec commitments this task implements. If non-empty, **the bullet bodies are the binding contract for "done"** — the implementation must satisfy each one, not merely match the prose `description`. The description is the agent-readable framing; the spec bullet bodies are the verifiable target. If a body is `null`, the reference is an orphan (the user edited the spec since the task was written) — surface this to the user before implementing; do not guess what the bullet used to say.
 
 2. Check whether `driver/<slug>_design.md` exists. If it doesn't AND the description contains any of: "schema", "Predicate", "Entity", "design pass first", or any other strong signal that the task needs upfront design — write the design doc as the first step. Commit it as one commit before proceeding with implementation.
 

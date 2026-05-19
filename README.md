@@ -143,6 +143,7 @@ driver answer <slug> <Q#> "<answer>"       record a decision on question Q#
 
 driver spec list                           show spec bullets with hash + met/planned/unmet status
 driver spec gap [--json]                   print unmet spec bullets (input to /driver:go synthesis)
+driver spec show <hash>                    print one bullet (name, body, tasks referencing it)
 driver spec amend <old-hash> <new-hash>    migrate plan.md refs after a cosmetic spec edit
 ```
 

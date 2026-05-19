@@ -110,6 +110,8 @@ enum SpecCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show a single spec bullet by hash (name + full body).
+    Show { hash: String },
     /// Migrate plan.md references from an old hash to a new hash.
     /// Use this after editing a bullet's wording in spec.md when you
     /// want the old work to apply to the new bullet.
@@ -155,6 +157,7 @@ fn main() -> ExitCode {
         Cmd::Spec { cmd } => match cmd {
             SpecCmd::List => cmd_spec_list(),
             SpecCmd::Gap { json } => cmd_spec_gap(json),
+            SpecCmd::Show { hash } => cmd_spec_show(&hash),
             SpecCmd::Amend { old, new } => cmd_spec_amend(&old, &new),
         },
         Cmd::Gate => unreachable!(),
@@ -702,14 +705,15 @@ fn cmd_next(json: bool) -> Result<(), String> {
     let root = project_root()?;
     let (_, _, tasks) = read_plan(&root)?;
     let blockers = transitive_blockers(&root, &tasks);
+    let bullets = read_spec(&root).unwrap_or_default();
     let next = tasks
         .iter()
         .find(|t| is_runnable(t, &tasks, &blockers))
         .ok_or_else(|| "no runnable tasks".to_string())?;
     if json {
-        print!("{}", task_json(next));
+        print!("{}", task_json(next, &bullets));
     } else {
-        print_task(next);
+        print_task(next, &bullets);
     }
     Ok(())
 }
@@ -737,7 +741,12 @@ fn cmd_tasks() -> Result<(), String> {
         } else {
             format!(" [depends: {}]", t.depends.join(", "))
         };
-        println!("{status}  {}{estimate}{deps}", t.slug);
+        let spec_tag = if t.spec_refs.is_empty() {
+            String::new()
+        } else {
+            format!(" [spec: {}]", t.spec_refs.join(", "))
+        };
+        println!("{status}  {}{estimate}{deps}{spec_tag}", t.slug);
     }
     Ok(())
 }
@@ -876,7 +885,7 @@ fn rewrite_depends(line: &str, old: &str, new: &str) -> String {
 
 // ---- helpers ----
 
-fn print_task(t: &Task) {
+fn print_task(t: &Task, spec_bullets: &[SpecBullet]) {
     let estimate = t
         .estimate
         .map(|e| format!(" (~{e}t)"))
@@ -886,10 +895,39 @@ fn print_task(t: &Task) {
     } else {
         format!(" [depends: {}]", t.depends.join(", "))
     };
-    println!("{}{estimate}{deps}", t.slug);
+    let spec_tag = if t.spec_refs.is_empty() {
+        String::new()
+    } else {
+        format!(" [spec: {}]", t.spec_refs.join(", "))
+    };
+    println!("{}{estimate}{deps}{spec_tag}", t.slug);
     if !t.description.is_empty() {
         for line in textwrap_simple(&t.description, 76) {
             println!("  {line}");
+        }
+    }
+    // Spec bullet bodies the task is committed to satisfying. These are
+    // the binding contract for "done" — surface them where the agent
+    // about to implement the task will see them.
+    if !t.spec_refs.is_empty() {
+        println!();
+        println!("  spec:");
+        for h in &t.spec_refs {
+            match spec_bullets.iter().find(|b| &b.hash == h) {
+                Some(b) => {
+                    let name = b
+                        .name
+                        .as_deref()
+                        .map(|n| format!("{n} — "))
+                        .unwrap_or_default();
+                    println!("    {h}  {name}{}", b.body);
+                }
+                None => {
+                    println!(
+                        "    {h}  (orphan — hash not in current spec.md; run `driver spec list`)"
+                    );
+                }
+            }
         }
     }
 }
@@ -914,7 +952,7 @@ fn textwrap_simple(s: &str, w: usize) -> Vec<String> {
     out
 }
 
-fn task_json(t: &Task) -> String {
+fn task_json(t: &Task, spec_bullets: &[SpecBullet]) -> String {
     let mut s = String::from("{\n");
     s.push_str(&format!("  \"slug\": {},\n", json_str(&t.slug)));
     if let Some(e) = t.estimate {
@@ -925,6 +963,30 @@ fn task_json(t: &Task) -> String {
         let sep = if i + 1 == t.depends.len() { "" } else { ", " };
         s.push_str(&json_str(d));
         s.push_str(sep);
+    }
+    s.push_str("],\n");
+    // Spec refs with resolved bodies. Embedded inline so a single
+    // `driver next --json` call gives /driver:do everything it needs.
+    s.push_str("  \"spec\": [");
+    for (i, h) in t.spec_refs.iter().enumerate() {
+        let sep = if i + 1 == t.spec_refs.len() { "" } else { ", " };
+        let bullet = spec_bullets.iter().find(|b| &b.hash == h);
+        let (name_json, body_json) = match bullet {
+            Some(b) => (
+                b.name
+                    .as_deref()
+                    .map(json_str)
+                    .unwrap_or_else(|| "null".into()),
+                json_str(&b.body),
+            ),
+            None => ("null".into(), "null".into()),
+        };
+        s.push_str(&format!(
+            "{{\"hash\": {}, \"name\": {}, \"body\": {}}}{sep}",
+            json_str(h),
+            name_json,
+            body_json,
+        ));
     }
     s.push_str("],\n");
     s.push_str(&format!(
@@ -2186,6 +2248,44 @@ fn cmd_spec_gap(json: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_spec_show(hash: &str) -> Result<(), String> {
+    let root = project_root()?;
+    let bullets = read_spec(&root)
+        .ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
+    let bullet = bullets
+        .iter()
+        .find(|b| b.hash == hash)
+        .ok_or_else(|| {
+            format!("no spec bullet with hash '{hash}'. Run `driver spec list` to see current hashes.")
+        })?;
+    let name = bullet
+        .name
+        .as_deref()
+        .map(|n| format!("  {n}"))
+        .unwrap_or_default();
+    println!("{}{name}", bullet.hash);
+    println!("{}", bullet.body);
+
+    // Show which tasks reference this bullet, with status.
+    let tasks: Vec<Task> = match read_plan(&root) {
+        Ok((_, _, t)) => t,
+        Err(_) => Vec::new(),
+    };
+    let referenced_by: Vec<&Task> = tasks
+        .iter()
+        .filter(|t| t.spec_refs.iter().any(|h| h == hash))
+        .collect();
+    if !referenced_by.is_empty() {
+        println!();
+        println!("Referenced by:");
+        for t in referenced_by {
+            let mark = if t.done { "✓" } else { "·" };
+            println!("  {mark} {}", t.slug);
+        }
+    }
+    Ok(())
+}
+
 fn cmd_spec_amend(old: &str, new: &str) -> Result<(), String> {
     if old == new {
         return Err("old and new hash are identical".into());
@@ -2388,6 +2488,45 @@ mod tests {
         let (out, n) = rewrite_spec_refs(line, "ffffff", "000000");
         assert_eq!(n, 0);
         assert_eq!(out, line);
+    }
+
+    #[test]
+    fn task_json_includes_spec_bodies() {
+        let task = Task {
+            done: false,
+            slug: "t".into(),
+            estimate: Some(3),
+            depends: vec![],
+            spec_refs: vec!["a3f2b1".into()],
+            line: 0,
+            description: "Do the thing.".into(),
+        };
+        let bullets = vec![SpecBullet {
+            hash: "a3f2b1".into(),
+            name: Some("payments".into()),
+            body: "Users can pay.".into(),
+            line: 0,
+        }];
+        let json = task_json(&task, &bullets);
+        assert!(json.contains("\"hash\": \"a3f2b1\""));
+        assert!(json.contains("\"name\": \"payments\""));
+        assert!(json.contains("\"body\": \"Users can pay.\""));
+    }
+
+    #[test]
+    fn task_json_orphan_spec_ref_resolves_to_null() {
+        let task = Task {
+            done: false,
+            slug: "t".into(),
+            estimate: None,
+            depends: vec![],
+            spec_refs: vec!["ffffff".into()],
+            line: 0,
+            description: String::new(),
+        };
+        let json = task_json(&task, &[]);
+        assert!(json.contains("\"hash\": \"ffffff\""));
+        assert!(json.contains("\"body\": null"));
     }
 
     #[test]
