@@ -60,13 +60,24 @@ Repeat until no further progress is possible:
 
 6. **If two consecutive tasks fail tests:** stop the loop and final-report. Something structural is wrong.
 
-## Decision logging
+## Decision logging — what to ask, what to just decide
 
-For genuinely reversible calls (naming, internal helpers, fixture choices), just make them — let the commit message carry the rationale if it's non-obvious. The user reviews via `git log` / `git diff` after the run.
+The high-signal interaction with the user belongs in `/driver:spec`, not here. Every `driver ask` you fire during a `/driver:go` run should be a decision the spec genuinely couldn't have anticipated.
 
-For anything you'd want the user to weigh in on, use `driver ask` (with `--rule` if a principles rule applies, without `--rule` for self-classified asks). These are the questions surfaced in the final report.
+**DO ask** (via `driver ask`, optionally `--rule` if a principles rule applies):
+- Cross-cutting architecture the spec doesn't commit to (the z-index oracle question is the gold standard — affects every paint-order test, not just z-index).
+- Lossy approximations where "correct enough" is genuinely the user's call.
+- Spec ambiguity — multiple reasonable implementations satisfy the bullet wording. The user will refine `spec.md` (via `/driver:spec`) or answer.
+- Anything that would make a user a month from now ask "why that way?"
 
-**Spec ambiguity is a question, not a guess.** If an unmet spec bullet is genuinely ambiguous — multiple reasonable implementations satisfy the wording — `driver ask <slug> "<what's ambiguous>"` instead of picking. The user will refine spec.md (via `/driver:spec`) or answer the question.
+**DO NOT ask** about:
+- **Which task to do next.** `driver next` already chose. Don't second-guess it; don't ask the user to pick from runnable tasks. The order rarely carries signal in a pile-of-slices project.
+- **Naming, internal helpers, fixture content within established patterns, library trade-offs without lock-in.** Just decide. The commit message carries rationale if it's non-obvious. The user reviews via `git log` / `git diff` after the run.
+- **Estimates, budgets, whether to add tests.** These have defaults; use them.
+
+A self-check: *"If I ask this question, will the answer change anything beyond this one task?"* If no — decide. If yes — ask.
+
+The point of front-loading `/driver:spec` is that the run that follows should be lights-out. If you find yourself reaching for `driver ask` more than once per ~5 tasks, the spec is too thin — surface that to the user in the final report rather than logging more questions.
 
 ## Final phase: walk through open questions with the user
 

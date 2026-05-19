@@ -37,10 +37,13 @@ Driver has three optional layers, each answering one question:
 | `plan.md`        | *What* work is in flight (and was done)?         | `/driver:go`, `/driver:new` |
 | `principles.md`  | *Which* file changes require explicit consent?   | user, manually   |
 
-`plan.md` is the only one that's required — Driver works fine without
-a spec. With a spec, high-level guidance like `/driver:go "continue
-building parity"` reads `spec.md`, finds bullets no task implements
-yet, and synthesizes tasks to close the gap.
+**Driver is spec-first.** `/driver:new` runs the spec interrogation
+before scaffolding `plan.md`; `/driver:go` synthesizes plan tasks from
+unmet spec bullets. The intent is to front-load high-signal
+interaction into the spec phase so the implementation phase can run
+lights-out. `plan.md` is the only file the CLI strictly requires — a
+plan-only project still works — but spec-first is the recommended
+flow for anything more than a few tasks.
 
 Plans look like:
 
@@ -163,11 +166,16 @@ Run from anywhere inside a project — `driver` walks up looking for
 
 | Slash command | What it does |
 |---|---|
-| `/driver:new` | Asks for title + task outline; scaffolds `plan.md`; commits |
-| `/driver:spec` | Conversational edits to `spec.md` (the contract layer); commits |
+| `/driver:new` | Bootstraps a project: runs the spec interrogation first, then scaffolds empty `plan.md`; commits |
+| `/driver:spec` | Interrogates the user across {target, shape, architecture, out-of-scope}; writes/extends `spec.md`; commits |
 | `/driver:status` | Wrapper around `driver status` |
 | `/driver:do` | Runs the next runnable task end-to-end (Stop-hook safety net) |
 | `/driver:go [guidance]` | Synthesizes tasks from `spec.md` gaps, then runs all runnable tasks |
+
+The intended workflow is: `/driver:new` once per project (the spec is
+the high-signal conversation), then `/driver:go` until the spec is
+fully met, then `/driver:spec` again to extend the contract when you
+want to grow the project.
 
 ## Principles + the autonomy floor
 

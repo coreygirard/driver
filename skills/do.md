@@ -50,9 +50,9 @@ If `driver/principles.md` exists, read it once at the top to understand which fi
    - `Turns: <actual>/<budget> (est ~<estimate>t, ratio <r>)` — copy the budget line that `driver tick` printed
    Keep it terse — six lines max.
 
-## Autonomy rubric (mechanical floor + self-classification ceiling)
+## Autonomy rubric
 
-There are two layers of escalation. They compose: the floor is leak-proof, the ceiling is judgment-driven.
+Two layers of escalation: a mechanical floor (CLI-enforced) and a self-classification ceiling (your judgment). The high-signal interaction belongs in `/driver:spec`, not here — every `driver ask` you fire inside `/driver:do` should be a decision the spec genuinely couldn't have anticipated.
 
 **Mechanical floor (enforced by `driver tick`).** `driver/principles.md` lists rules. Each rule names a file glob; touching any matching file during a claim makes the rule "tripped." Tick refuses unless you have logged a question with that rule tag:
 
@@ -62,16 +62,24 @@ driver ask <slug> --rule <name> "<question>" --context "..."
 
 You can't bypass this. If you touch a path on a tripped glob, you must ask.
 
-**Self-classification ceiling (your judgment).** Use `driver ask` *without* `--rule` for anything that:
-- locks multiple future tasks into a pattern,
-- ships a lossy approximation (where "correct enough" is your call),
-- might surprise the user ("they could have wanted this differently"),
-- changes how concepts are represented (entity shape, fixture format, modelling conventions).
+**Self-classification ceiling (your judgment).** Use `driver ask` *without* `--rule` for cross-cutting decisions that the spec doesn't already commit to. The gold standard: the web-renderer project's `z-index` task hit "how do we verify paint order when getBoundingClientRect doesn't observe it?" — a decision that affects every future paint-order test, not just this one task. That belongs in `ask`.
 
-You can keep working on parts of the task that don't depend on the answer. The question waits for the user. If you genuinely can't make further progress, re-run with `--halt` (`driver ask <slug> --halt "..."`) — that releases the claim and marks the task halted until answered.
+**DO ask** about:
+- Cross-cutting architecture the spec doesn't already commit to (test/oracle setup, representation choices that propagate, public-concept naming).
+- Lossy approximations where "correct enough" is genuinely the user's call.
+- Symmetry breaks across the codebase ("we handle X this way here but Y over there — which is right?").
+- Anything that would make a user a month from now ask "why did you do it that way?"
 
-**What stays out of `ask` entirely.** Reversible local calls — naming, internal helpers, test fixture content within the patterns the description names, library choices that don't lock long-term — just do them, and let the commit message carry the rationale if it's non-obvious. The user reviews via `git log` / `git diff` after the run.
+**DO NOT ask** about:
+- **Which task to do next.** If multiple tasks are runnable, pick any one — the order rarely carries signal. `driver next` already chose; trust it.
+- **Naming.** Variables, internal helpers, test names, fixture names — just pick. The commit message carries rationale if it's non-obvious.
+- **Fixture content within an established pattern.** The spec or description specifies the shape; pick concrete values.
+- **Library/dependency choices without long-term lock-in.** Pick the obvious one and move on.
+- **Estimates and budgets.** Use what the plan says or pick a number; `driver stats` calibrates over time.
+- **Whether to add a test.** Yes. Always. That's table stakes, not a decision.
 
-**When in doubt: ask.** Asking is cheap (one CLI call, doesn't halt). The user will see all questions batched at the end of `/driver:go`. Over-asking is fine; under-asking is what we're trying to prevent.
+A useful self-check: *"If I ask this question, will the answer change anything beyond this one task?"* If no, don't ask — decide and document in the commit. If yes, ask.
+
+**When in doubt about a cross-cutting decision: ask.** Asking is cheap (one CLI call, doesn't halt). But asking about within-scope decisions costs the user attention every time and is the noise this rubric exists to suppress.
 
 **Do not skip the test run, do not tick a task whose tests don't pass.**

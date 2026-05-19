@@ -184,6 +184,49 @@ stack.md` + `workflow.md`) is: one file, tight schema, falsifiable
 content. The skill (`/driver:spec`) is responsible for enforcing this
 norm in conversation.
 
+### Spec-first workflow + interaction budget
+
+Driver is **spec-first**: `/driver:new` runs `/driver:spec` before
+scaffolding any plan, and `/driver:go` synthesizes plan tasks from
+unmet spec bullets. This shape was chosen after observing the first
+real Driver run (`web-renderer`, 18 ticked tasks in a day): only 1 of
+those 18 tasks logged a question, and that question was about the
+oracle architecture — a *cross-cutting* decision that should have
+lived in the spec from the start. The other 17 tasks consumed user
+attention only via "which CSS feature should I implement next?" —
+low-signal queue-management.
+
+The shift moves the high-signal interaction upfront into `/driver:spec`,
+which interrogates across four categories: **Target** (what does done
+look like, falsifiable), **Shape** (one pile of slices vs sequence of
+epics vs tight loop), **Architecture** (cross-cutting decisions that
+span every task — oracle setup, parity definition, invariants,
+representation choices), and **Out of scope** (explicit non-goals to
+shut down "should we add X?" later). The first three categories carry
+the load; out-of-scope is the brake.
+
+Section headers (`## Target`, `## Architecture`, etc.) are visual
+only — the parser doesn't model categories. The discipline lives in
+the skill, not in the file format.
+
+### Anti-ask rubric for the run
+
+During `/driver:go` and `/driver:do`, the rubric is:
+
+- **Ask** for cross-cutting architecture not already in the spec,
+  lossy approximations where the user's call matters, spec ambiguity,
+  things that lock multiple future tasks.
+- **Don't ask** about which task to do next, names, fixture content
+  within established patterns, library trade-offs without long-term
+  lock-in, estimates/budgets, whether to add tests.
+
+The self-check: *"if I ask this, will the answer change anything
+beyond this one task?"* No → decide. Yes → ask.
+
+If the agent finds itself reaching for `driver ask` more than once per
+~5 tasks, the spec was too thin — that's a signal to extend `spec.md`
+via `/driver:spec`, not to log more questions.
+
 ## Autonomy rubric: mechanical floor + self-classification ceiling
 
 The earlier prose-only rubric ("decide reversible things, escalate
