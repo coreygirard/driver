@@ -141,9 +141,12 @@ encouraged because asking is cheap (one CLI call, doesn't halt).
 `driver ask` is non-blocking. The task remains open (work is committed,
 tick refuses, agent moves on). Other tasks can still be claimed and
 worked. `/driver:go` keeps looping until no task can advance, then
-batches all open questions into one end-of-run report. The user
-reviews and answers everything in one pass, then re-runs `/driver:go`
-and staged tasks resume.
+the skill switches into a *conversational walkthrough* with the user
+over all the accumulated open questions — one at a time, with context
+and the agent's recommendation, pausing for discussion. When the user
+decides, the skill records the answer via `driver answer <track>
+<slug> <Q#> "<decision>"`. Once all answered, `/driver:go` resumes the
+loop with the now-runnable staged tasks.
 
 `driver block` still exists for the "fully stuck, can't even commit
 partial work" case. Different channel, harder block.

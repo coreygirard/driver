@@ -99,6 +99,15 @@ enum Cmd {
     },
     /// List open questions across the project (or one track).
     Questions { track: Option<String> },
+    /// Record an answer to a logged question. Replaces `_pending_` on
+    /// the matching Q's answer line.
+    Answer {
+        track: String,
+        slug: String,
+        /// 1-based question index, as shown by `driver questions`.
+        index: u32,
+        answer: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -146,6 +155,12 @@ fn main() -> ExitCode {
             context,
         } => cmd_ask(&track, &slug, &question, rule.as_deref(), context.as_deref()),
         Cmd::Questions { track } => cmd_questions(track.as_deref()),
+        Cmd::Answer {
+            track,
+            slug,
+            index,
+            answer,
+        } => cmd_answer(&track, &slug, index, &answer),
         Cmd::Gate => unreachable!(),
     };
     match result {
@@ -1694,6 +1709,54 @@ fn cmd_ask(
         rule.map(|r| format!(" [rule={r}]")).unwrap_or_default(),
         path.display()
     );
+    Ok(())
+}
+
+/// Record an answer to question <index> in <slug>_questions.md.
+/// Walks the file line-by-line, finds the matching `## Q<index>:`
+/// section, and replaces its `**answer:** ...` line (or the first
+/// `**answer:**` line within that section). Idempotent — running
+/// twice replaces the prior answer.
+fn cmd_answer(track: &str, slug: &str, index: u32, answer: &str) -> Result<(), String> {
+    let (root, _) = read_tracks()?;
+    let path = questions_path(&root, track, slug);
+    if !path.exists() {
+        return Err(format!("no questions file for {track}/{slug}"));
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("read: {e}"))?;
+    let header_prefix = format!("## Q{index}");
+    let mut out: Vec<String> = Vec::new();
+    let mut in_section = false;
+    let mut replaced = false;
+    for line in text.lines() {
+        if line.starts_with("## Q") {
+            // Entering a new Q section.
+            in_section = line.starts_with(&header_prefix)
+                && line
+                    .chars()
+                    .nth(header_prefix.len())
+                    .map(|c| c == ':' || c.is_whitespace())
+                    .unwrap_or(true);
+        }
+        if in_section && !replaced && line.starts_with("**answer:**") {
+            out.push(format!("**answer:** {}", answer.trim()));
+            replaced = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !replaced {
+        return Err(format!(
+            "no Q{index} found in {} (or it has no `**answer:**` line)",
+            path.display()
+        ));
+    }
+    let mut new_text = out.join("\n");
+    if text.ends_with('\n') {
+        new_text.push('\n');
+    }
+    fs::write(&path, new_text).map_err(|e| format!("write: {e}"))?;
+    println!("Q{index} answered for {track}/{slug}.");
     Ok(())
 }
 

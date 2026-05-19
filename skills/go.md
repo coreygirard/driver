@@ -35,35 +35,51 @@ For genuinely reversible calls (naming, internal helpers, fixture choices), appe
 
 For anything you'd want the user to weigh in on, use `driver ask` (with `--rule` if a principles rule applies, without `--rule` for self-classified asks). These are the questions surfaced in the final report.
 
-## Final report
+## Final phase: walk through open questions with the user
 
-When the loop exits, gather and print everything the user needs to resume:
+When the loop exits with open questions still staged, **don't print-and-stop.** Switch into a conversational walkthrough.
+
+1. State a brief summary first: "I ran N tasks, completed X, staged Y. There are Q open questions across [list of slugs]. Let's go through them one at a time."
+
+2. For each open question (run `driver questions` to enumerate):
+   - State the question (one or two sentences).
+   - State the trade-off, alternatives considered, and your recommendation.
+   - Pause. The user may discuss, push back, or want more detail. Respond conversationally.
+   - When the user decides, record via `driver answer <track> <slug> <Q#> "<decision>"`.
+   - Move to the next question.
+
+3. Once all questions are answered (or the user wants to leave some for later), offer to resume: "All answered — want me to continue running `/driver:go` from where we left off?" If yes, restart the loop from step 1 of the outer Loop.
+
+Order the questions by importance: mechanical-floor (rule-tagged) questions first, since they tend to be more foundational than self-classified ones. Within each group, walk in track-then-Q-number order.
+
+If the user wants to skip a question ("come back to that later"), respect it. That task stays staged; the others can still resume.
+
+## Completion report
+
+After the conversation phase, if everything resolved and the loop ran to true completion:
 
 ```
-/driver:go summary — <track_id>
+/driver:go done — <track_id>
 
 Completed:   N tasks (~total turns spent)
   - <slug>   <commit>   (<actual>/<budget> turns)
-  - ...
-
-Staged (work committed, awaiting answers): M tasks
-  - <slug>   <K open question(s)>
-
-Blocked (fully stuck): L tasks
-  - <slug>   <reason>
 
 Decisions logged: D  → driver/tracks/<track_id>/decisions.md
+Questions answered:  Q (all resolved during this run)
 
-Open questions: Q (run `driver questions` for full list):
-
-  [<track>/<slug>] Q1 (rule=<name>): <question>
-    <context>
-    Answer by editing the file: driver/tracks/.../{slug}_questions.md
-    (replace `_pending_` with your decision)
-
-  [<track>/<slug>] Q2 ...
+Track closed.
 ```
 
-When the user has answered the questions, they re-run `/driver:go` and the staged tasks become runnable again — agent picks up where it left off.
+If there are still unanswered questions or blocks at the end:
+
+```
+/driver:go paused — <track_id>
+
+Completed:   N tasks
+Staged (still open):
+  - <slug>   <K unanswered question(s)>
+
+Re-run /driver:go when you want to walk through the remaining questions.
+```
 
 **Do not modify tracks other than the named one. Do not skip tests. Do not tick a task whose tests don't pass. Do not invent answers to your own questions.**

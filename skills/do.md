@@ -27,7 +27,18 @@ Optional positional argument: `<track_id>`. If omitted, the CLI picks the open t
 
 6. Commit the implementation with a clear message that includes the task slug. Then `driver tick <track_id> <slug>` (writes `.history.jsonl`, releases the active claim, enforces gates).
 
-   If tick refuses with a "principles rule tripped" error, run the suggested `driver ask --rule <name>` command. If it refuses with "unanswered question(s)", you can't proceed without user input — print the question(s) and stop. `/driver:go` will batch these for the user; `/driver:do` halts here.
+   If tick refuses with a "principles rule tripped" error, run the suggested `driver ask --rule <name>` command and continue.
+
+   If tick refuses with "unanswered question(s)", **walk the user through them one at a time.** Don't dump the list and stop. For each open question:
+   - State the question (one or two sentences, not the full file contents).
+   - State the context the user needs to weigh in: what's the trade-off, what alternatives were considered, what's your recommendation.
+   - Pause for the user to discuss. They may push back, ask for alternatives, or want more detail. Respond conversationally.
+   - When the user has decided, record the answer with `driver answer <track_id> <slug> <Q#> "<decision>"`. The decision can be terse — the conversation captures the reasoning, the file records the verdict.
+   - Move to the next question.
+
+   After all questions are answered, re-run `driver tick`. It should succeed (assuming no new floor trips). Proceed to step 7.
+
+   If the user wants to stop mid-walkthrough (e.g. "I need to think about Q2 — answer Q1 and Q3, leave Q2 for later"), respect that. The task remains staged with Q2 pending; the user re-runs `/driver:do` when ready.
 
 7. Print a multi-line summary using the data you already have:
    - `Completed <slug> — <commit-hash>`

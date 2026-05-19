@@ -114,6 +114,7 @@ driver stats [<track>]                       estimate-vs-actual from .history.js
 driver ask <track> <slug> "<question>" [--rule <name>] [--context "..."]
                                              log an open question for batched user review
 driver questions [<track>]                   list all open questions (answered + unanswered)
+driver answer <track> <slug> <Q#> "<answer>" record a decision on question Q#
 ```
 
 `driver tick` records `{estimate, actual_turns}` to
@@ -149,9 +150,13 @@ Driver's autonomy rubric has two layers:
   symmetry breaks). The agent's judgment; over-asking is encouraged.
 
 Questions land in `<slug>_questions.md` with a `**answer:** _pending_`
-marker. The user answers in-place; `driver tick` then succeeds. The
-`/driver:go` skill batches all open questions into one end-of-run
-report so the user reviews everything at once.
+marker. When `driver tick` refuses on unanswered questions, the
+`/driver:do` and `/driver:go` skills walk the user through each one
+*conversationally* — present the question and recommendation, pause
+for discussion, then record the user's decision via `driver answer`.
+`/driver:go` batches all open questions across the whole run before
+opening the conversation, so the user reviews everything in one
+sitting.
 
 See `DESIGN.md` for the full rationale.
 
