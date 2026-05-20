@@ -36,6 +36,7 @@ If `driver/principles.md` exists, read it once at the top to understand which fi
    - State the context the user needs to weigh in: what's the trade-off, what alternatives were considered, what's your recommendation.
    - Pause for the user to discuss. They may push back, ask for alternatives, or want more detail. Respond conversationally.
    - When the user has decided, record the answer with `driver answer <slug> <Q#> "<decision>"`. The decision can be terse — the conversation captures the reasoning, the file records the verdict.
+   - **If the decision is precedent-setting** (it would change how *future* tasks are built, not just this one), also pass `--promote "<bullet body>"` to append it as a spec.md `## Architecture` bullet. Phrase the body as a falsifiable commitment, not a transcript. The new bullet's hash will print, and future tasks inherit the decision instead of re-asking.
    - Move to the next question.
 
    After all questions are answered, re-run `driver tick`. It should succeed (assuming no new floor trips). Proceed to step 7.

@@ -4,6 +4,8 @@ This is for "burn down the plan while I'm away" mode.
 
 **Optional argument**: free-text guidance like `/driver:go "continue building parity"` or `/driver:go "focus on auth flows"`. When the project has a `driver/spec.md`, the guidance shapes which unmet spec bullets get synthesized into plan tasks at the start of this run. Without guidance, all unmet bullets are candidates.
 
+**Optional flag**: `--dry-run` (anywhere in the argument string) prints the synthesis plan and stops — no claim, no implementation, no plan.md edits. Use it to sanity-check the decomposition before burning turns.
+
 ## Prerequisite check
 
 Run `driver doctor` once at the top. If it exits non-zero, surface the ✗ items to the user and stop. Same recovery as `/driver:do`.
@@ -17,6 +19,8 @@ If `driver/principles.md` exists, read it once to know which file changes will t
 ## Phase 0 — Spec-driven synthesis (if `driver/spec.md` exists)
 
 If the project has a `driver/spec.md`, run this phase before entering the loop. **Skip if the file is absent — the project is plan-only.**
+
+0. Run `driver spec check`. If it exits non-zero, surface the failing bullets to the user and stop — synthesis quality is bounded by spec specificity, and a failing lint means the agent will either produce stub tasks or drown in `driver ask` questions. The user should rewrite the bullets via `/driver:spec` or tag them `[narrative]`. (If the user *really* wants to proceed past a failing lint, they can re-run with `--force-spec`; treat that as an explicit override and note it in the synthesis summary.)
 
 1. Run `driver spec gap --json`. The output is a JSON array of unmet bullets `[{hash, name, body}, …]`.
 
@@ -58,6 +62,8 @@ If the project has a `driver/spec.md`, run this phase before entering the loop. 
 
 6. **State the synthesis briefly to the user** before committing: "I'm synthesizing N tasks from M unmet bullets — [one-line summary]. Closing without input." Don't ask for approval; the spec was the approval. Do this so the user can interrupt if the decomposition obviously went wrong.
 
+   **If invoked with `--dry-run`**: instead of writing to plan.md, print the proposed task block (the markdown bullets you would have appended) and stop. Do not commit, do not claim, do not enter the loop. End with: "dry-run complete — re-run /driver:go (no --dry-run) to commit and execute, or adjust the spec first."
+
 7. Commit the appended tasks: `git add driver/plan.md && git commit -m "driver: synthesize <N> tasks from spec — <one-line summary>"`.
 
 8. **Then enter the loop below.** The synthesized tasks now appear in `driver next`.
@@ -80,6 +86,8 @@ Repeat until no further progress is possible:
 5. **If a task is fully stuck** (not just an open question — you genuinely can't make further progress): `driver ask <slug> --halt "<question>"`. That logs the question with a halt marker, releases the active claim, and makes dependents transitively unreachable until the question is answered. Loop on.
 
 6. **If two consecutive tasks fail tests:** stop the loop and final-report. Something structural is wrong.
+
+7. **If `driver gate` releases the claim with a "scope signal" message** (new questions per turn ≥ ~1/3): the spec is under-specifying this task, not just hard. *Do not* re-claim and answer-spew. Note the slug as "scope-thin" in the final report, leave the questions for the walkthrough, and continue the outer loop on a different runnable task. The user will see the scope-thin slugs surfaced at the end and can extend the spec via `/driver:spec`.
 
 ## Decision logging — what to ask, what to just decide
 
@@ -111,6 +119,7 @@ When the loop exits with open questions still staged, **don't print-and-stop.** 
    - State the trade-off, alternatives considered, and your recommendation.
    - Pause. The user may discuss, push back, or want more detail. Respond conversationally.
    - When the user decides, record via `driver answer <slug> <Q#> "<decision>"`.
+   - **If the decision is precedent-setting** — it would change how *future* tasks are built, not just this one — also pass `--promote "<bullet body>"` to append it as a new spec.md bullet under `## Architecture`. Phrase the body as a falsifiable commitment, not a Q-and-A transcript. Example: `driver answer z-index 1 "elementsFromPoint via paint_order_at" --promote "**paint-order-oracle** Paint-order tests use a dedicated pipeline (\`paint_order_at(x, y)\` + Chromium's \`document.elementsFromPoint\`) producing a separate \`oracle-paint-order-v1\` snapshot; canonical for any z-index, overflow, or stacking-context test."`. The new bullet's hash will print; future synthesis runs will treat it as a met-by-this-task commitment instead of re-asking.
    - Move to the next question.
 
 3. Once all questions are answered (or the user wants to leave some for later), offer to resume: "All answered — want me to continue running `/driver:go` from where we left off?" If yes, restart the loop from step 1 of the outer Loop.

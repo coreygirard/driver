@@ -120,7 +120,11 @@ turn ends with `driver gate` running. If a claim is active and the
 task isn't ticked or halted, gate exits 2 — Claude Code interprets
 this as "keep working." The claim auto-releases when the task is
 ticked (`driver tick`), halted by an unanswered `driver ask --halt`
-question, or budget exhausted.
+question, budget exhausted, or the **question-rate scope signal**
+trips (≥2 new questions accumulating at ≥1/3 per turn — meaning the
+spec is under-specifying this task rather than the task being merely
+hard). The scope signal prints a distinct message so skills know to
+re-spec rather than answer-and-retry.
 
 ## CLI commands
 
@@ -142,11 +146,19 @@ driver ask <slug> "<question>" [--rule <name>] [--halt] [--context "..."]
                                            log an open question for batched user review
                                            --halt marks the task halted until answered
 driver questions                           list all open questions (answered + unanswered)
-driver answer <slug> <Q#> "<answer>"       record a decision on question Q#
+driver answer <slug> <Q#> "<answer>" [--promote "<spec-body>"]
+                                           record a decision on question Q#
+                                           --promote appends <spec-body> as a new spec.md
+                                           bullet under `## Architecture`, so future tasks
+                                           inherit the decision instead of re-asking
 
 driver spec list                           show spec bullets with hash + met/planned/unmet status
 driver spec gap [--json]                   print unmet spec bullets (input to /driver:go synthesis)
 driver spec show <hash>                    print one bullet (name, body, tasks referencing it)
+driver spec check                          lint each bullet for a concrete verifier signal;
+                                           exit non-zero if any bullet has none (test/command/
+                                           backticked identifier/predicate/[narrative] tag).
+                                           `/driver:go` runs this before synthesis.
 driver spec amend <old-hash> <new-hash>    migrate plan.md refs after a cosmetic spec edit
 ```
 
@@ -170,7 +182,7 @@ Run from anywhere inside a project — `driver` walks up looking for
 | `/driver:spec` | Interrogates the user across {target, shape, architecture, out-of-scope}; writes/extends `spec.md`; commits |
 | `/driver:status` | Wrapper around `driver status` |
 | `/driver:do` | Runs the next runnable task end-to-end (Stop-hook safety net) |
-| `/driver:go [guidance]` | Synthesizes tasks from `spec.md` gaps, then runs all runnable tasks |
+| `/driver:go [guidance] [--dry-run]` | Synthesizes tasks from `spec.md` gaps, then runs all runnable tasks. `--dry-run` prints the proposed task block and stops — no plan.md edit, no claim, no execution. |
 
 The intended workflow is: `/driver:new` once per project (the spec is
 the high-signal conversation), then `/driver:go` until the spec is

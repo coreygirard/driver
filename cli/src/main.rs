@@ -37,10 +37,7 @@ enum Cmd {
     /// Untick a task (mark open again).
     Untick { slug: String },
     /// Rename a task: updates plan.md and renames <slug>_* files.
-    Rename {
-        old_slug: String,
-        new_slug: String,
-    },
+    Rename { old_slug: String, new_slug: String },
     /// Start a claim on a task. Configures the Stop hook to keep the
     /// agent working until the task is ticked, halted, or budget is hit.
     /// `--max-turns` defaults to `ceil(estimate * 1.3 / 5) * 5` when the
@@ -91,6 +88,12 @@ enum Cmd {
         /// 1-based question index, as shown by `driver questions`.
         index: u32,
         answer: String,
+        /// Also append <body> as a new spec.md bullet under
+        /// `## Architecture`. Use when the answer is a precedent-
+        /// setting call that should propagate to future tasks instead
+        /// of being lost in this task's questions file.
+        #[arg(long, value_name = "BODY")]
+        promote: Option<String>,
     },
     /// Inspect or amend spec.md (content-hashed bullets defining what
     /// the project commits to being).
@@ -121,6 +124,12 @@ enum SpecCmd {
         /// New hash (find via `driver spec list` after editing).
         new: String,
     },
+    /// Lint each bullet for a concrete verifier signal (test path,
+    /// command, backticked identifier, parity/oracle/snapshot
+    /// keyword, or the literal tag `[narrative]`). Exits non-zero
+    /// if any bullet has no verifier — `/driver:go` refuses
+    /// synthesis on a failing spec.
+    Check,
 }
 
 fn main() -> ExitCode {
@@ -153,12 +162,14 @@ fn main() -> ExitCode {
             slug,
             index,
             answer,
-        } => cmd_answer(&slug, index, &answer),
+            promote,
+        } => cmd_answer(&slug, index, &answer, promote.as_deref()),
         Cmd::Spec { cmd } => match cmd {
             SpecCmd::List => cmd_spec_list(),
             SpecCmd::Gap { json } => cmd_spec_gap(json),
             SpecCmd::Show { hash } => cmd_spec_show(&hash),
             SpecCmd::Amend { old, new } => cmd_spec_amend(&old, &new),
+            SpecCmd::Check => cmd_spec_check(),
         },
         Cmd::Gate => unreachable!(),
     };
@@ -212,10 +223,7 @@ struct Task {
 fn read_plan(root: &Path) -> Result<(PathBuf, Vec<String>, Vec<Task>), String> {
     let plan_md = root.join("plan.md");
     if !plan_md.exists() {
-        return Err(format!(
-            "no plan.md at {}",
-            plan_md.display()
-        ));
+        return Err(format!("no plan.md at {}", plan_md.display()));
     }
     let text = fs::read_to_string(&plan_md).map_err(|e| format!("read plan.md: {e}"))?;
     let lines: Vec<String> = text.lines().map(String::from).collect();
@@ -267,10 +275,7 @@ fn parse_tasks(lines: &[String]) -> Result<Vec<Task>, String> {
     for t in &tasks {
         for dep in &t.depends {
             if !slugs.contains(dep.as_str()) {
-                return Err(format!(
-                    "task '{}' depends on unknown task '{dep}'",
-                    t.slug
-                ));
+                return Err(format!("task '{}' depends on unknown task '{dep}'", t.slug));
             }
         }
     }
@@ -472,7 +477,11 @@ fn rewrite_spec_refs(line: &str, old: &str, new: &str) -> (String, u32) {
         .filter(|s| !s.is_empty())
         .collect();
     let replacement = format!("[spec: {}]", parts.join(", "));
-    let result = format!("{}{replacement}{}", &line[..start], &line[start + end_rel + 1..]);
+    let result = format!(
+        "{}{replacement}{}",
+        &line[..start],
+        &line[start + end_rel + 1..]
+    );
     (result, count)
 }
 
@@ -615,10 +624,7 @@ fn cmd_status() -> Result<(), String> {
     // == spec ==
     if let Some(bullets) = read_spec(&root) {
         println!("\n== spec ==");
-        let tasks: Vec<Task> = plan
-            .as_ref()
-            .map(|(_, _, t)| t.clone())
-            .unwrap_or_default();
+        let tasks: Vec<Task> = plan.as_ref().map(|(_, _, t)| t.clone()).unwrap_or_default();
         if bullets.is_empty() {
             println!("  (spec.md has no bullets)");
         } else {
@@ -653,7 +659,10 @@ fn cmd_status() -> Result<(), String> {
                 println!("    ○ {}{name}  {preview}{ellipsis}", b.hash);
             }
             if unmet_bullets.len() > 3 {
-                println!("    … {} more (see `driver spec gap`)", unmet_bullets.len() - 3);
+                println!(
+                    "    … {} more (see `driver spec gap`)",
+                    unmet_bullets.len() - 3
+                );
             }
         }
     }
@@ -732,10 +741,7 @@ fn cmd_tasks() -> Result<(), String> {
         } else {
             "waiting"
         };
-        let estimate = t
-            .estimate
-            .map(|e| format!(" ~{e}t"))
-            .unwrap_or_default();
+        let estimate = t.estimate.map(|e| format!(" ~{e}t")).unwrap_or_default();
         let deps = if t.depends.is_empty() {
             String::new()
         } else {
@@ -818,7 +824,10 @@ fn cmd_tick(slug: &str, done: bool) -> Result<(), String> {
             }
         }
     } else {
-        println!("No change ({slug} already {}).", if done { "done" } else { "open" });
+        println!(
+            "No change ({slug} already {}).",
+            if done { "done" } else { "open" }
+        );
     }
     Ok(())
 }
@@ -886,10 +895,7 @@ fn rewrite_depends(line: &str, old: &str, new: &str) -> String {
 // ---- helpers ----
 
 fn print_task(t: &Task, spec_bullets: &[SpecBullet]) {
-    let estimate = t
-        .estimate
-        .map(|e| format!(" (~{e}t)"))
-        .unwrap_or_default();
+    let estimate = t.estimate.map(|e| format!(" (~{e}t)")).unwrap_or_default();
     let deps = if t.depends.is_empty() {
         String::new()
     } else {
@@ -1038,6 +1044,11 @@ struct ActiveClaim {
     /// record the estimate the *user authored* before any mid-flight
     /// plan.md edits, and so `driver stats` can flag scope-growth.
     estimate_at_claim: Option<u32>,
+    /// Count of unanswered questions for this slug at claim time. Gate
+    /// uses (current_unanswered − this) / turn as a scope signal: a
+    /// task accumulating questions faster than ~1/3 turn is most
+    /// likely under-specified, not just hard.
+    questions_at_claim: u32,
 }
 
 fn active_path(root: &Path) -> PathBuf {
@@ -1053,6 +1064,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
     let mut started_at = String::new();
     let mut start_commit = String::new();
     let mut estimate_at_claim: Option<u32> = None;
+    let mut questions_at_claim: u32 = 0;
     for line in text.lines() {
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -1064,6 +1076,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
             "started_at" => started_at = v.trim().to_string(),
             "start_commit" => start_commit = v.trim().to_string(),
             "estimate_at_claim" => estimate_at_claim = v.trim().parse().ok(),
+            "questions_at_claim" => questions_at_claim = v.trim().parse().unwrap_or(0),
             // Legacy `track=` field from pre-flat data is silently ignored.
             _ => {}
         }
@@ -1078,6 +1091,7 @@ fn read_active(root: &Path) -> Option<ActiveClaim> {
         started_at,
         start_commit,
         estimate_at_claim,
+        questions_at_claim,
     })
 }
 
@@ -1088,13 +1102,14 @@ fn write_active(root: &Path, claim: &ActiveClaim) -> Result<(), String> {
         .map(|e| e.to_string())
         .unwrap_or_default();
     let body = format!(
-        "slug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\nestimate_at_claim={}\n",
+        "slug={}\nmax_turns={}\nturn={}\nstarted_at={}\nstart_commit={}\nestimate_at_claim={}\nquestions_at_claim={}\n",
         claim.slug,
         claim.max_turns,
         claim.turn,
         claim.started_at,
         claim.start_commit,
         est,
+        claim.questions_at_claim,
     );
     fs::write(&path, body).map_err(|e| format!("write {}: {e}", path.display()))
 }
@@ -1174,6 +1189,10 @@ fn cmd_claim(slug: &str, max_turns: Option<u32>) -> Result<(), String> {
         }
     };
     let start_commit = git_head_commit(&root).unwrap_or_default();
+    let questions_at_claim = read_questions(&root, slug)
+        .iter()
+        .filter(|q| !q.answered)
+        .count() as u32;
     let claim = ActiveClaim {
         slug: slug.to_string(),
         max_turns,
@@ -1181,6 +1200,7 @@ fn cmd_claim(slug: &str, max_turns: Option<u32>) -> Result<(), String> {
         started_at: iso_now(),
         start_commit,
         estimate_at_claim,
+        questions_at_claim,
     };
     write_active(&root, &claim)?;
     let how = if defaulted {
@@ -1262,6 +1282,32 @@ fn cmd_gate() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Question-rate scope signal. A task accumulating new questions
+    // faster than ~1/3 per turn is most likely under-specified, not
+    // just hard. Release the claim with a distinct message so the
+    // skill caller knows to re-spec rather than answer-and-retry. The
+    // accumulated questions stay on file for the conversational
+    // walkthrough at the end of the /driver:go run.
+    let current_unanswered = read_questions(&root, &claim.slug)
+        .iter()
+        .filter(|q| !q.answered)
+        .count() as u32;
+    let new_q = current_unanswered.saturating_sub(claim.questions_at_claim);
+    let min_turn: u32 = 4;
+    let min_new_q: u32 = 2;
+    let rate_threshold: f64 = 1.0 / 3.0;
+    if claim.turn >= min_turn && new_q >= min_new_q {
+        let rate = new_q as f64 / claim.turn as f64;
+        if rate >= rate_threshold {
+            delete_active(&root);
+            eprintln!(
+                "[driver] turn {}/{} — {}: scope signal. {} new question(s) in {} turn(s) ({:.2}/turn ≥ {:.2}/turn). Spec likely under-specifies this task. Re-spec via /driver:spec, or release and pick a different runnable task.",
+                claim.turn, claim.max_turns, claim.slug, new_q, claim.turn, rate, rate_threshold,
+            );
+            return ExitCode::SUCCESS;
+        }
+    }
+
     // Persist the bumped turn counter.
     if let Err(e) = write_active(&root, &claim) {
         eprintln!("driver gate: failed to update claim: {e}");
@@ -1316,9 +1362,7 @@ fn history_path(root: &Path) -> PathBuf {
 fn append_history(root: &Path, rec: &HistoryRecord) {
     use std::io::Write as _;
     let path = history_path(root);
-    let opt_num = |v: Option<u32>| {
-        v.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
-    };
+    let opt_num = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_else(|| "null".into());
     let line = format!(
         "{{\"ts\": {}, \"slug\": {}, \"estimate\": {}, \"actual_turns\": {}, \"budget\": {}, \"estimate_at_claim\": {}, \"status\": {}}}\n",
         json_str(&rec.ts),
@@ -1398,10 +1442,7 @@ fn json_number(line: &str, key: &str) -> Option<u32> {
 fn cmd_stats() -> Result<(), String> {
     let root = find_driver_root()?;
     let records = read_history(&root);
-    let mut records: Vec<&HistoryRecord> = records
-        .iter()
-        .filter(|r| r.status == "done")
-        .collect();
+    let mut records: Vec<&HistoryRecord> = records.iter().filter(|r| r.status == "done").collect();
     if records.is_empty() {
         println!("No history yet. Tick a task to populate .history.jsonl.");
         return Ok(());
@@ -1417,9 +1458,7 @@ fn cmd_stats() -> Result<(), String> {
 
     println!("Driver stats — {n} completed task(s)");
     if n_no_actual > 0 {
-        println!(
-            "  ({n_no_actual} ticked without a claim — actual_turns not captured)"
-        );
+        println!("  ({n_no_actual} ticked without a claim — actual_turns not captured)");
     }
 
     if !with_actual.is_empty() {
@@ -1443,10 +1482,7 @@ fn cmd_stats() -> Result<(), String> {
             .filter_map(|(r, a)| r.estimate.map(|e| (*r, *a, e)))
             .collect();
         if !with_est.is_empty() {
-            let ratio_sum: f64 = with_est
-                .iter()
-                .map(|(_, a, e)| *a as f64 / *e as f64)
-                .sum();
+            let ratio_sum: f64 = with_est.iter().map(|(_, a, e)| *a as f64 / *e as f64).sum();
             let ratio_mean = ratio_sum / with_est.len() as f64;
             println!(
                 "  actual/est:    mean {ratio_mean:.2} ({})",
@@ -1527,11 +1563,15 @@ fn cmd_doctor() -> Result<(), String> {
 
     // 1. Binary discoverable on PATH as `driver`?
     let on_path = which_on_path("driver").is_some();
-    report(on_path, "`driver` on PATH", &if on_path {
-        which_on_path("driver").unwrap()
-    } else {
-        format!("not found on PATH (binary lives at {bin})")
-    });
+    report(
+        on_path,
+        "`driver` on PATH",
+        &if on_path {
+            which_on_path("driver").unwrap()
+        } else {
+            format!("not found on PATH (binary lives at {bin})")
+        },
+    );
     all_ok &= on_path;
 
     // 2. Stop hook installed in ~/.claude/settings.json?
@@ -1555,9 +1595,7 @@ fn cmd_doctor() -> Result<(), String> {
         // at a different driver build that errors out. Run the command
         // from a no-project cwd (so gate finds no .active and exits 0)
         // and check the exit code.
-        let cmd = settings_text
-            .as_deref()
-            .and_then(extract_hook_command);
+        let cmd = settings_text.as_deref().and_then(extract_hook_command);
         match cmd {
             Some(c) => match invoke_hook_command(&c) {
                 Ok(0) => report(true, "Stop hook runs", &format!("`{c}` exit 0")),
@@ -1570,7 +1608,11 @@ fn cmd_doctor() -> Result<(), String> {
                     all_ok = false;
                 }
                 Err(e) => {
-                    report(false, "Stop hook runs", &format!("`{c}` failed to run: {e}"));
+                    report(
+                        false,
+                        "Stop hook runs",
+                        &format!("`{c}` failed to run: {e}"),
+                    );
                     all_ok = false;
                 }
             },
@@ -1601,7 +1643,10 @@ fn cmd_doctor() -> Result<(), String> {
             }
         }
         Err(_) => {
-            println!("ℹ {:<28} (cd into a project to check)", "driver/ project in cwd");
+            println!(
+                "ℹ {:<28} (cd into a project to check)",
+                "driver/ project in cwd"
+            );
         }
     }
 
@@ -1979,7 +2024,9 @@ fn cmd_ask(
     let mut body = if path.exists() {
         fs::read_to_string(&path).unwrap_or_default()
     } else {
-        format!("# Open questions — {slug}\n\nAnswer each by replacing `_pending_` with your decision; re-run `/driver:go` or `/driver:do` to resume.\n")
+        format!(
+            "# Open questions — {slug}\n\nAnswer each by replacing `_pending_` with your decision; re-run `/driver:go` or `/driver:do` to resume.\n"
+        )
     };
     if !body.ends_with('\n') {
         body.push('\n');
@@ -2010,7 +2057,10 @@ fn cmd_ask(
     } else {
         format!(" [{}]", tags.join(", "))
     };
-    println!("Q{next_idx} logged for {slug}{tag_str} → {}", path.display());
+    println!(
+        "Q{next_idx} logged for {slug}{tag_str} → {}",
+        path.display()
+    );
     if halt {
         // If this halt-question belongs to the actively-claimed task,
         // release the claim — the agent has signalled "stuck."
@@ -2029,7 +2079,13 @@ fn cmd_ask(
 /// section, and replaces its `**answer:** ...` line (or the first
 /// `**answer:**` line within that section). Idempotent — running
 /// twice replaces the prior answer.
-fn cmd_answer(slug: &str, index: u32, answer: &str) -> Result<(), String> {
+///
+/// If `promote` is `Some(body)`, also appends `body` as a new bullet
+/// under `## Architecture` in spec.md and prints the new hash. This
+/// closes the feedback loop: a precedent-setting answer becomes a
+/// commitment future tasks inherit instead of dying in this task's
+/// questions file.
+fn cmd_answer(slug: &str, index: u32, answer: &str, promote: Option<&str>) -> Result<(), String> {
     let root = project_root()?;
     let path = questions_path(&root, slug);
     if !path.exists() {
@@ -2069,7 +2125,94 @@ fn cmd_answer(slug: &str, index: u32, answer: &str) -> Result<(), String> {
     }
     fs::write(&path, new_text).map_err(|e| format!("write: {e}"))?;
     println!("Q{index} answered for {slug}.");
+    if let Some(body) = promote {
+        let hash = promote_to_spec(&root, body)?;
+        println!("  promoted to spec.md as {hash}.");
+    }
     Ok(())
+}
+
+/// Append `body` as a new bullet under `## Architecture` in spec.md
+/// (or at end-of-file if that section is missing). Returns the new
+/// bullet's content hash. Errors if spec.md is missing or if the
+/// body already exists verbatim (same content hash).
+fn promote_to_spec(root: &Path, body: &str) -> Result<String, String> {
+    let path = spec_path(root);
+    if !path.exists() {
+        return Err(format!(
+            "no spec.md at {} — scaffold one with /driver:spec first",
+            path.display()
+        ));
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("--promote body is empty".into());
+    }
+    // Strip leading `- ` if the caller included it.
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    // Parse out optional `**name**` for hash normalization parity
+    // with read_spec's bullet parsing.
+    let normalized_for_hash = match parse_bold_slug(body) {
+        Some((_n, rest)) => normalize_body(rest.trim_start()),
+        None => normalize_body(body),
+    };
+    let hash = spec_hash(&normalized_for_hash);
+    let existing = read_spec(root).unwrap_or_default();
+    if existing.iter().any(|b| b.hash == hash) {
+        return Err(format!(
+            "spec.md already contains a bullet with hash {hash} (same body)"
+        ));
+    }
+    let text = fs::read_to_string(&path).map_err(|e| format!("read spec.md: {e}"))?;
+    let new_text = append_spec_bullet(&text, body, "## Architecture");
+    fs::write(&path, new_text).map_err(|e| format!("write spec.md: {e}"))?;
+    Ok(hash)
+}
+
+/// Insert `- <body>` into `text` after the last bullet of the
+/// preferred section, or at end-of-file if the section is absent.
+/// Preserves trailing-newline shape so existing hashes don't shift.
+fn append_spec_bullet(text: &str, body: &str, preferred_section: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let bullet = format!("- {body}");
+    let trailing_nl = text.ends_with('\n');
+    let section_idx = lines.iter().position(|l| l.trim_end() == preferred_section);
+    let Some(start) = section_idx else {
+        // No section header — append at end with a blank-line separator.
+        let mut out = String::from(text);
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out.push_str(&bullet);
+        out.push('\n');
+        return out;
+    };
+    // Find the next `## ` header (or EOF) to bound the section.
+    let mut end = lines.len();
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        if l.starts_with("## ") {
+            end = i;
+            break;
+        }
+    }
+    // Insert after the last non-blank line in the section.
+    let mut insert_at = start + 1;
+    for i in (start + 1..end).rev() {
+        if !lines[i].trim().is_empty() {
+            insert_at = i + 1;
+            break;
+        }
+    }
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    out.insert(insert_at, bullet);
+    let mut joined = out.join("\n");
+    if trailing_nl {
+        joined.push('\n');
+    }
+    joined
 }
 
 fn cmd_questions() -> Result<(), String> {
@@ -2171,10 +2314,7 @@ fn cmd_spec_list() -> Result<(), String> {
         } else {
             ""
         };
-        println!(
-            "{mark} {hash}{name}  {preview}{ellipsis}",
-            hash = b.hash
-        );
+        println!("{mark} {hash}{name}  {preview}{ellipsis}", hash = b.hash);
     }
     println!(
         "\n{} bullets — {met} met, {planned} planned, {unmet} unmet",
@@ -2194,9 +2334,7 @@ fn cmd_spec_list() -> Result<(), String> {
     if !orphans.is_empty() {
         println!("\nOrphan references in plan.md (hash not in current spec.md):");
         for h in &orphans {
-            println!(
-                "  {h} — run `driver spec amend {h} <new-hash>` if you reworded a bullet"
-            );
+            println!("  {h} — run `driver spec amend {h} <new-hash>` if you reworded a bullet");
         }
     }
     Ok(())
@@ -2204,8 +2342,8 @@ fn cmd_spec_list() -> Result<(), String> {
 
 fn cmd_spec_gap(json: bool) -> Result<(), String> {
     let root = project_root()?;
-    let bullets = read_spec(&root)
-        .ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
+    let bullets =
+        read_spec(&root).ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
     let tasks: Vec<Task> = match read_plan(&root) {
         Ok((_, _, t)) => t,
         Err(_) => Vec::new(),
@@ -2250,14 +2388,11 @@ fn cmd_spec_gap(json: bool) -> Result<(), String> {
 
 fn cmd_spec_show(hash: &str) -> Result<(), String> {
     let root = project_root()?;
-    let bullets = read_spec(&root)
-        .ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
-    let bullet = bullets
-        .iter()
-        .find(|b| b.hash == hash)
-        .ok_or_else(|| {
-            format!("no spec bullet with hash '{hash}'. Run `driver spec list` to see current hashes.")
-        })?;
+    let bullets =
+        read_spec(&root).ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
+    let bullet = bullets.iter().find(|b| b.hash == hash).ok_or_else(|| {
+        format!("no spec bullet with hash '{hash}'. Run `driver spec list` to see current hashes.")
+    })?;
     let name = bullet
         .name
         .as_deref()
@@ -2286,13 +2421,171 @@ fn cmd_spec_show(hash: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Lint heuristic: a spec bullet must show at least one concrete
+/// verifier signal — a backticked identifier, a verifier keyword
+/// (test/oracle/parity/snapshot/assert/runner/...), a measurable
+/// predicate (%, ≤, ≥), a file extension or command token, or be a
+/// negative commitment ("no X", typical out-of-scope) — or carry the
+/// literal tag `[narrative]` to opt out. Returns `Some(reason)` for a
+/// failing bullet, `None` if it passes.
+fn lint_spec_bullet(body: &str) -> Option<String> {
+    let raw = body.trim();
+    if raw.contains("[narrative]") {
+        return None;
+    }
+    if raw.contains('`') {
+        return None;
+    }
+    let lower = raw.to_lowercase();
+    let neg_starts = [
+        "no ", "not ", "never ", "avoid ", "don't ", "doesn't ", "no,", "no.",
+    ];
+    if neg_starts.iter().any(|s| lower.starts_with(s)) {
+        return None;
+    }
+    let signals = [
+        "test",
+        "oracle",
+        "parity",
+        "snapshot",
+        "assert",
+        "passes",
+        "passing",
+        "runner",
+        "byte-stable",
+        "pixel",
+        "rect",
+        "manifest",
+        "verifies",
+        "verify",
+        "equal",
+        "equals",
+        "≤",
+        ">=",
+        "<=",
+        "%",
+        "regression",
+        "fixture",
+        "cargo ",
+        "pytest",
+        "npm ",
+        "make ",
+        ".rs",
+        ".md",
+        ".py",
+        ".ts",
+        ".js",
+        ".toml",
+        ".json",
+        ".html",
+        ".css",
+        "stdin",
+        "stdout",
+        " cli ",
+        " cli.",
+        "--",
+        "endpoint",
+        "round-trip",
+        "round trip",
+        "deterministic",
+    ];
+    if signals.iter().any(|s| lower.contains(s)) {
+        return None;
+    }
+    let vague = [
+        "good ",
+        "great ",
+        "robust",
+        "production-ready",
+        "well-designed",
+        "high-quality",
+        "best-in-class",
+        "scalable",
+        "performant",
+        " fast ",
+        "reliable",
+        "world-class",
+        "modern",
+        "clean ",
+        "nice ",
+    ];
+    for v in &vague {
+        if lower.contains(v) {
+            return Some(format!(
+                "vague quality adjective ('{}') with no concrete verifier — rewrite or tag [narrative]",
+                v.trim()
+            ));
+        }
+    }
+    if raw.split_whitespace().count() < 6 {
+        return Some(
+            "too terse (<6 words) — no test path, command, predicate, or [narrative] tag"
+                .to_string(),
+        );
+    }
+    Some(
+        "no concrete verifier (test path, command, backticked identifier, parity/oracle/snapshot keyword, or [narrative] tag)"
+            .to_string(),
+    )
+}
+
+fn cmd_spec_check() -> Result<(), String> {
+    let root = project_root()?;
+    let bullets = read_spec(&root).ok_or_else(|| {
+        format!(
+            "no spec.md at {} — scaffold one with `/driver:spec`",
+            spec_path(&root).display()
+        )
+    })?;
+    if bullets.is_empty() {
+        println!("(spec.md has no bullets yet)");
+        return Ok(());
+    }
+    let mut fails: u32 = 0;
+    for b in &bullets {
+        let name = b
+            .name
+            .as_deref()
+            .map(|n| format!(" {n}"))
+            .unwrap_or_default();
+        let preview: String = b.body.chars().take(56).collect();
+        let ellipsis = if b.body.chars().count() > 56 {
+            "…"
+        } else {
+            ""
+        };
+        match lint_spec_bullet(&b.body) {
+            None => println!("✓ {hash}{name}  {preview}{ellipsis}", hash = b.hash),
+            Some(reason) => {
+                fails += 1;
+                println!("✗ {hash}{name}  {preview}{ellipsis}", hash = b.hash);
+                println!("    {reason}");
+            }
+        }
+    }
+    let total = bullets.len() as u32;
+    println!(
+        "\n{total} bullet(s) — {} passing, {fails} failing",
+        total - fails
+    );
+    if fails > 0 {
+        println!();
+        println!("Failing bullets have no concrete verifier. Either:");
+        println!("  - rewrite to name a test, command, identifier, or measurable predicate, or");
+        println!("  - add the literal tag `[narrative]` to opt the bullet out.");
+        println!("/driver:go refuses synthesis on a failing spec.");
+        return Err(format!("{fails} bullet(s) failed lint"));
+    }
+    Ok(())
+}
+
 fn cmd_spec_amend(old: &str, new: &str) -> Result<(), String> {
     if old == new {
         return Err("old and new hash are identical".into());
     }
     let root = project_root()?;
-    let bullets = read_spec(&root)
-        .ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
+    let bullets =
+        read_spec(&root).ok_or_else(|| format!("no spec.md at {}", spec_path(&root).display()))?;
     if !bullets.iter().any(|b| b.hash == new) {
         return Err(format!(
             "no current spec bullet has hash '{new}'. Run `driver spec list` to see current hashes."
@@ -2318,11 +2611,7 @@ fn cmd_spec_amend(old: &str, new: &str) -> Result<(), String> {
 
 /// Check the principles floor + answered-status for a task that's
 /// about to be ticked. Returns Err with a diagnostic if anything fails.
-fn enforce_tick_gates(
-    root: &Path,
-    slug: &str,
-    start_commit: Option<&str>,
-) -> Result<(), String> {
+fn enforce_tick_gates(root: &Path, slug: &str, start_commit: Option<&str>) -> Result<(), String> {
     // Floor: triggered files touched since claim start must have a
     // matching rule-tagged question.
     let rules = read_principles(root);
@@ -2345,7 +2634,12 @@ fn enforce_tick_gates(
                     return Err(format!(
                         "principles rule '{}' tripped — touched: {}\n  → run `driver ask {slug} --rule {} \"<question>\" --context \"...\"` first, or revert the change.",
                         rule.name,
-                        tripped.iter().take(3).map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                        tripped
+                            .iter()
+                            .take(3)
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
                         rule.name,
                     ));
                 }
@@ -2527,6 +2821,80 @@ mod tests {
         let json = task_json(&task, &[]);
         assert!(json.contains("\"hash\": \"ffffff\""));
         assert!(json.contains("\"body\": null"));
+    }
+
+    #[test]
+    fn lint_passes_bullet_with_backticked_identifier() {
+        assert!(
+            lint_spec_bullet("Cascade computes `font_size_px` once after all declarations.")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lint_passes_bullet_with_verifier_keyword() {
+        assert!(
+            lint_spec_bullet(
+                "Every layout feature ships with an oracle test in tests/oracle_layout_parity.rs."
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn lint_passes_negative_commitment() {
+        assert!(lint_spec_bullet("No new crate dependencies without explicit ask.").is_none());
+    }
+
+    #[test]
+    fn lint_passes_narrative_tag() {
+        assert!(lint_spec_bullet("The renderer should feel modern. [narrative]").is_none());
+    }
+
+    #[test]
+    fn lint_fails_vague_quality_adjective() {
+        let reason =
+            lint_spec_bullet("The project is well-designed and robust for users.").unwrap();
+        assert!(reason.contains("vague"));
+    }
+
+    #[test]
+    fn lint_fails_terse_bullet() {
+        let reason = lint_spec_bullet("Solid foundation.").unwrap();
+        assert!(reason.contains("too terse"));
+    }
+
+    #[test]
+    fn lint_fails_bullet_with_no_signal() {
+        let reason =
+            lint_spec_bullet("The project will eventually support many different uses.").unwrap();
+        assert!(reason.contains("no concrete verifier"));
+    }
+
+    #[test]
+    fn append_spec_bullet_inserts_under_section() {
+        let text = "# X\n\n## Target\n\n- one.\n\n## Architecture\n\n- a thing.\n\n## Out of scope\n\n- not that.\n";
+        let out = append_spec_bullet(text, "**new** body here.", "## Architecture");
+        // The new bullet must land after "- a thing." but before "## Out of scope".
+        let arch_pos = out.find("## Architecture").unwrap();
+        let oos_pos = out.find("## Out of scope").unwrap();
+        let new_pos = out.find("**new**").unwrap();
+        assert!(new_pos > arch_pos);
+        assert!(new_pos < oos_pos);
+        // Existing bullet bodies still hash the same.
+        let bullets = parse_spec(&out);
+        let bodies: Vec<&str> = bullets.iter().map(|b| b.body.as_str()).collect();
+        assert!(bodies.contains(&"one."));
+        assert!(bodies.contains(&"a thing."));
+        assert!(bodies.contains(&"not that."));
+    }
+
+    #[test]
+    fn append_spec_bullet_appends_when_section_missing() {
+        let text = "# X\n\n## Target\n\n- one.\n";
+        let out = append_spec_bullet(text, "**new** body.", "## Architecture");
+        // Lands at the end.
+        assert!(out.trim_end().ends_with("- **new** body."));
     }
 
     #[test]
